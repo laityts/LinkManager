@@ -1,46 +1,36 @@
-🔗 Link Manager - Cloudflare Workers
+Link Manager - Cloudflare Worker
 
-一个现代化、功能丰富的链接管理与状态监控系统，基于 Cloudflare Workers 构建，为订阅服务提供完整的展示、监控和统计解决方案。
+一个功能完整的链接管理与状态监控系统，基于 Cloudflare Workers 构建，提供实时状态检测、访问统计和智能通知功能。
 
-https://img.shields.io/badge/Cloudflare-Workers-orange?style=for-the-badge&logo=cloudflare
-https://img.shields.io/badge/Version-2.0-blue?style=for-the-badge
-https://img.shields.io/badge/License-MIT-green?style=for-the-badge
+✨ 核心功能
 
-✨ 核心特性
+🔗 链接管理
 
-🎯 主要功能
+· 安全链接展示 - 优雅的订阅链接展示界面
+· 一键复制 - 点击即可复制订阅链接到剪贴板
+· 实时状态检测 - 自动监控链接可用性
 
-功能 描述 状态
-订阅链接管理 安全展示和复制订阅链接 ✅ 稳定
-实时状态监控 自动检测链接可用性 ✅ 稳定
-智能访问统计 详细的用户行为分析 ✅ 稳定
-Telegram 通知 异常状态自动告警 ✅ 稳定
-管理面板 完整的后台管理系统 ✅ 稳定
+📊 智能统计
 
-📊 统计维度
-
-· 页面访问量 - 主页访问次数统计
-· 独立访客数 - 基于 IP 地址的去重统计
-· 用户行为 - 复制操作和 Telegram 点击
-· 访问日志 - 详细的 IP 访问记录
-· 实时状态 - 链接健康状态监控
+· 访问统计 - 页面访问量、独立访客数
+· 行为分析 - 复制点击、Telegram 点击统计
+· IP 日志 - 详细的访问记录和地理位置信息
+· 自动清零 - 每日自动重置统计数据
 
 🔔 智能通知
 
-· 自动检测 - 每 5 分钟检查链接状态
-· 状态告警 - 异常时立即发送通知
-· 恢复通知 - 服务恢复时发送确认
-· 测试功能 - 支持手动测试通知
+· 状态监控 - 每 5 分钟自动检查链接状态
+· 即时告警 - 链接异常时发送 Telegram 通知
+· 状态恢复通知 - 服务恢复时自动发送通知
+· 测试功能 - 支持测试通知配置
+
+🛡️ 安全管理
+
+· 密码保护 - 管理员密码加密存储
+· 访问控制 - HttpOnly Cookie 认证机制
+· 操作日志 - 完整的操作记录和 IP 追踪
 
 🚀 快速部署
-
-环境要求
-
-· ✅ Cloudflare 账户
-· ✅ Workers 权限
-· ✅ KV 命名空间
-
-部署步骤
 
 1. 创建 KV 命名空间
 
@@ -48,13 +38,12 @@ Telegram 通知 异常状态自动告警 ✅ 稳定
 wrangler kv:namespace create "LINK_MANAGER_KV"
 ```
 
-1. 配置项目
+2. 配置 wrangler.toml
 
 ```toml
-# wrangler.toml
 name = "link-manager"
 main = "worker.js"
-compatibility_date = "2024-03-20"
+compatibility_date = "2024-01-01"
 
 [[kv_namespaces]]
 binding = "LINK_MANAGER_KV"
@@ -64,276 +53,182 @@ id = "your_kv_namespace_id"
 crons = ["*/5 * * * *", "0 16 * * *"]
 ```
 
-1. 部署到 Cloudflare
+3. 部署到 Cloudflare
 
 ```bash
-# 安装依赖（如有）
-npm install
-
-# 部署
 wrangler deploy
 ```
 
-1. 初始设置
-   访问管理面板完成初始化：
+⚙️ 初始配置
 
-```
-https://your-worker.your-subdomain.workers.dev/admin
-```
+首次访问设置
 
-⚙️ 配置指南
+1. 访问 https://your-worker.your-subdomain.workers.dev/admin
+2. 设置管理员密码
+3. 配置订阅链接和 Telegram 群组
 
-🔧 基本配置项
+必要配置项
 
-配置项 说明 示例
-SUBSCRIPTION_URL 订阅服务链接 https://api.example.com/subscribe
-TELEGRAM_GROUP Telegram 群组链接 https://t.me/your_group
+· 订阅链接 - 需要管理的服务订阅地址
+· Telegram 群组 - 用户交流群组链接
+· Bot Token (可选) - Telegram 机器人令牌
+· Chat ID (可选) - 通知接收聊天 ID
 
-🤖 Telegram 通知配置
-
-1. 创建 Bot
-   · 联系 @BotFather
-   · 使用 /newbot 命令创建机器人
-   · 保存生成的 Bot Token
-2. 获取 Chat ID
-   · 联系 @userinfobot
-   · 获取您的用户 ID 或群组 ID
-3. 配置参数
-   · TELEGRAM_BOT_TOKEN: 机器人 Token
-   · TELEGRAM_CHAT_ID: 接收通知的 Chat ID
-
-📊 统计配置
-
-· 自动重置: 每日北京时间 00:00
-· 数据保留: IP 日志保留 100 条
-· 去重统计: 基于 IP 地址的独立访客
-
-🎮 使用说明
-
-👤 用户界面
-
-用户访问主域名即可看到：
-
-· ✅ 服务状态指示器
-· 📋 一键复制订阅链接
-· ✈️ Telegram 群组入口
-· ⏰ 最后更新时间
-
-👨‍💼 管理面板
-
-访问 /admin 路径进入管理界面：
-
-功能模块
-
-1. 数据看板
-   · 实时统计数据显示
-   · 今日访问趋势
-   · 系统状态监控
-2. 配置管理
-   · 链接配置更新
-   · 通知设置
-   · 系统参数调整
-3. 访问日志
-   · IP 访问记录查询
-   · 用户行为分析
-   · 实时监控数据
-
-操作指南
-
-```bash
-# 访问管理面板
-https://your-domain.com/admin
-
-# 初始设置（首次访问）
-1. 设置管理员密码
-2. 配置订阅链接
-3. 设置 Telegram 通知（可选）
-4. 保存配置
-```
-
-🔌 API 接口文档
+📡 API 接口
 
 公共接口
 
-端点 方法 描述 参数
-/ GET 主页面 -
-/api/check-link GET 检查链接状态 -
-/api/stats POST 记录用户行为 {type: 'copy_clicks'}
+端点 方法 描述
+/ GET 主展示页面
+/api/check-link GET 检查链接状态
+/api/stats POST 记录用户行为
 
 管理接口
 
-端点 方法 描述 认证
-/admin GET 管理面板 ✅
-/admin/api/login POST 管理员登录 ❌
-/admin/api/update-config POST 更新配置 ✅
-/admin/api/test-telegram POST 测试通知 ✅
+端点 方法 描述
+/admin GET 管理面板
+/admin/api/login POST 管理员登录
+/admin/api/update-config POST 更新配置
+/admin/api/test-telegram POST 测试通知
 
-⏰ 定时任务系统
+🎯 使用指南
 
-自动监控任务
+用户端使用
+
+1. 访问主页 - 查看订阅链接状态
+2. 复制链接 - 点击按钮一键复制订阅链接
+3. 加入群组 - 通过 Telegram 按钮加入交流群
+
+管理员使用
+
+1. 登录管理面板 - 使用设置的管理密码登录
+2. 查看统计数据 - 监控访问量和使用情况
+3. 配置服务 - 更新订阅链接和通知设置
+4. 测试功能 - 验证 Telegram 通知是否正常
+
+⏰ 定时任务
+
+自动状态检查
 
 ```cron
-*/5 * * * *    # 每5分钟检查链接状态
+*/5 * * * *    # 每5分钟检查一次链接状态
 ```
 
-数据维护任务
+每日统计重置
 
 ```cron
-0 16 * * *     # 每日 UTC 16:00（北京时间00:00）重置统计
+0 16 * * *     # 每天 UTC 16:00 (北京时间 00:00)
 ```
 
-任务功能说明
+🔧 配置说明
 
-1. 状态检查
-   · 验证订阅链接可达性
-   · 更新最后检查时间
-   · 触发状态变更通知
-2. 数据维护
-   · 重置每日计数器
-   · 清理过期数据
-   · 更新统计日期
+Telegram 通知配置
 
-🛡️ 安全特性
+1. 通过 @BotFather 创建 Telegram 机器人
+2. 获取 Bot Token
+3. 通过 @userinfobot 获取 Chat ID
+4. 在管理面板中配置相关参数
 
-认证安全
+统计配置
 
-· 🔒 密码加密存储
-· 🍪 HttpOnly Session Cookie
-· 🛡️ CSRF 攻击防护
-· ⏰ Session 安全管理
+· 页面访问 - 主页访问次数统计
+· 独立访客 - 基于 IP 地址的去重统计
+· 操作统计 - 用户复制和点击行为记录
+· 日志保留 - 最近 100 条 IP 访问日志
 
-数据安全
+🛠️ 开发信息
 
-· 📍 IP 访问记录
-· 🔍 操作日志审计
-· 🗑️ 数据自动清理
-· 💾 安全的 KV 存储
+技术架构
 
-访问控制
+· 运行时：Cloudflare Workers
+· 存储：Cloudflare KV
+· 前端：原生 HTML/CSS/JavaScript
+· 通知：Telegram Bot API
 
-· 👁️ 管理面板访问限制
-· 📊 统计接口权限控制
-· 🔐 配置更新认证
+项目结构
 
-📈 监控与统计
-
-实时指标
-
-指标 说明 更新频率
-页面访问量 主页访问次数 实时
-独立访客 去重访问人数 实时
-用户行为 复制和点击统计 实时
-链接状态 服务健康状态 5分钟
-
-数据分析
-
-· 📊 每日访问趋势
-· 👥 用户行为分析
-· 🔗 链接稳定性统计
-· 📱 访问来源分析
+```
+worker.js
+├── 路由处理 (fetch)
+├── 定时任务 (scheduled)
+├── 工具函数
+│   ├── 状态检查
+│   ├── 通知发送
+│   └── 统计记录
+├── 管理功能
+│   ├── 认证系统
+│   ├── 配置管理
+│   └── 数据统计
+└── 前端界面
+    ├── 用户主页
+    ├── 登录页面
+    └── 管理面板
+```
 
 🐛 故障排除
 
 常见问题
 
-1. 部署问题
+1. 通知无法发送
 
-问题: Worker 部署失败
+· 检查 Bot Token 和 Chat ID 是否正确
+· 确认机器人已加入对应聊天
+· 验证网络连接是否正常
 
-```bash
-# 解决方案
-wrangler publish --new-class
-```
+2. 统计数据显示异常
 
-2. 通知不工作
+· 检查 KV 存储权限
+· 确认定时任务正常执行
+· 查看 Workers 日志输出
 
-检查步骤:
+3. 链接状态检测失败
 
-1. 验证 Bot Token 格式
-2. 确认 Chat ID 正确性
-3. 测试通知功能
-4. 检查网络连接
-
-3. 统计异常
-
-排查方法:
-
-1. 确认 KV 存储权限
-2. 检查定时任务状态
-3. 验证时区设置
-4. 查看 Worker 日志
+· 验证订阅链接可访问性
+· 检查网络超时设置
+· 确认 CORS 配置正确
 
 日志查看
 
-```bash
-# 查看实时日志
-wrangler tail
+通过 Cloudflare Workers 控制台查看实时日志和错误信息。
 
-# 查看特定时间日志
-wrangler tail --format=pretty
-```
+📈 监控指标
 
-🔄 更新维护
+性能指标
 
-版本更新
+· 链接状态检查成功率
+· 通知发送延迟
+· 页面加载时间
 
-```bash
-# 拉取最新代码
-git pull origin main
+业务指标
 
-# 重新部署
-wrangler deploy
-```
+· 日活跃用户数
+· 用户操作转化率
+· 服务可用性百分比
 
-数据备份
+🔒 安全考虑
 
-```bash
-# 导出 KV 数据
-wrangler kv:key list --binding=LINK_MANAGER_KV
-```
+数据保护
 
-🎯 使用场景
+· 管理员密码加密存储
+· 敏感配置信息隔离
+· 访问日志匿名化处理
 
-适用场景
+访问安全
 
-· 🔗 订阅服务提供商
-· 📊 需要访问统计的链接服务
-· 🔔 需要状态监控的 API 服务
-· 👥 用户群体分析项目
-
-典型案例
-
-1. VPN 订阅服务
-2. API 密钥分发
-3. 私有服务访问
-4. 会员专属内容
-
-🤝 贡献指南
-
-我们欢迎社区贡献！请遵循以下流程：
-
-1. Fork 项目
-2. 创建功能分支 (git checkout -b feature/AmazingFeature)
-3. 提交更改 (git commit -m 'Add some AmazingFeature')
-4. 推送到分支 (git push origin feature/AmazingFeature)
-5. 开启 Pull Request
+· 管理接口身份验证
+· 操作行为审计追踪
+· IP 地址访问限制
 
 📄 许可证
 
-本项目采用 MIT 许可证 - 查看 LICENSE 文件了解详情。
-
-🆘 获取帮助
-
-· 📚 Cloudflare Workers 文档
-· 💬 创建 Issue
-· 🐛 报告 Bug
-· 💡 功能请求
+MIT License - 详见 LICENSE 文件
 
 ---
 
-Powered by Cloudflare Workers • Built with ❤️ for the community
+技术支持：如遇问题，请通过 Telegram 群组或提交 Issue 获取帮助。
+
+版本更新：定期检查更新以获取新功能和安全补丁。
 
 ---
 
-最后更新: 2024年3月20日
-版本: v2.0
+Powered by Cloudflare Workers
