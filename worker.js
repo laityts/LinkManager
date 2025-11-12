@@ -168,7 +168,7 @@ async function sendTelegramMessage(KV, message) {
   }
 }
 
-// 记录页面访问统计（包含IP记录和去重统计）
+// 记录页面访问统计（包含IP记录和统计）
 async function recordPageView(KV, request) {
   const today = getBeijingDateString();
   const lastResetDate = await KV.get('stats_reset_date');
@@ -189,7 +189,7 @@ async function recordPageView(KV, request) {
   // 记录访问IP日志（包含地理位置信息）
   await recordIPLog(KV, clientInfo);
   
-  // 记录去重访问人数
+  // 记录访问人数
   await recordUniqueVisitor(KV, clientInfo.ip, today);
 }
 
@@ -201,39 +201,44 @@ function getClientInfo(request) {
                    request.headers.get('X-Real-IP') || 
                    'unknown';
   
-  // 从 Cloudflare 的 cf 对象获取地理位置信息
+  // 从 Cloudflare 的 cf 对象获取地理位置和网络信息
   const country = request.cf?.country || '未知';
   const city = request.cf?.city || '未知';
   const region = request.cf?.region || '未知';
   const regionCode = request.cf?.regionCode || '未知';
+  const asn = request.cf?.asn || '未知';
+  const asOrganization = request.cf?.asOrganization || '未知';
+  const isp = asOrganization !== '未知' ? asOrganization : '未知';
   
   return {
     ip: clientIP,
     country: country,
     city: city,
     region: region,
-    regionCode: regionCode
+    regionCode: regionCode,
+    asn: asn,
+    isp: isp
   };
 }
 
-// 记录IP访问日志（包含地理位置信息）
+// 记录IP访问日志（包含地理位置和网络信息）- 多行格式
 async function recordIPLog(KV, clientInfo) {
   const timestamp = convertToBeijingTime(new Date());
   
-  // 构建详细的日志条目
-  let logEntry = `${timestamp} - IP: ${clientInfo.ip}`;
+  // 构建多行日志条目，符合要求的格式
+  let logEntry = `${timestamp}\n` +
+                `IP 地址: ${clientInfo.ip}\n` +
+                `国家: ${clientInfo.country}\n` +
+                `城市: ${clientInfo.city}\n` +
+                `ISP: ${clientInfo.isp}\n` +
+                `ASN: ${clientInfo.asn}`;
   
-  // 添加地理位置信息（如果可用）
-  if (clientInfo.country !== '未知') {
-    logEntry += ` - 国家: ${clientInfo.country}`;
-  }
-  if (clientInfo.city !== '未知') {
-    logEntry += ` - 城市: ${clientInfo.city}`;
-  }
-  if (clientInfo.region !== '未知' && clientInfo.region !== clientInfo.city) {
-    logEntry += ` - 地区: ${clientInfo.region}`;
-  }
-  
+  // 保存回KV
+  await saveIPLogToKV(KV, logEntry);
+}
+
+// 保存IP日志到KV（分离出来便于维护）
+async function saveIPLogToKV(KV, logEntry) {
   // 获取现有的日志（最多保留最近100条）
   const existingLogs = await KV.get('ip_access_logs');
   let logsArray = [];
@@ -254,11 +259,11 @@ async function recordIPLog(KV, clientInfo) {
   await KV.put('ip_access_logs', JSON.stringify(logsArray));
 }
 
-// 记录去重访问人数
+// 记录访问人数
 async function recordUniqueVisitor(KV, clientIP, today) {
   const uniqueVisitorsKey = `daily_unique_visitors_${today}`;
   
-  // 获取今天的去重访问者集合
+  // 获取今天的访问者集合
   const existingVisitors = await KV.get(uniqueVisitorsKey);
   let visitorsSet = new Set();
   
@@ -386,7 +391,7 @@ async function getStats(KV) {
     await resetDailyStats(KV);
   }
   
-  // 获取去重访问人数
+  // 获取访问人数
   const uniqueVisitorsKey = `daily_unique_visitors_${today}`;
   const uniqueVisitorsData = await KV.get(uniqueVisitorsKey);
   const uniqueVisitors = uniqueVisitorsData ? JSON.parse(uniqueVisitorsData).length : 0;
@@ -896,7 +901,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
 
   // 构建IP日志HTML
   const ipLogsHTML = stats.ip_logs && stats.ip_logs.length > 0 
-    ? stats.ip_logs.map(log => `<div style="padding: 5px 0; border-bottom: 1px solid #eee; font-family: monospace; font-size: 12px;">${log}</div>`).join('')
+    ? stats.ip_logs.map(log => `<div style="padding: 8px 0; border-bottom: 1px solid #eee; font-family: monospace; font-size: 12px; white-space: pre-line; line-height: 1.4;">${log}</div>`).join('')
     : '<div style="padding: 10px; text-align: center; color: #999;">暂无访问日志</div>';
 
   return `<!DOCTYPE html>
@@ -1024,7 +1029,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                     </div>
                     <div class="info-box">
                         <strong>统计重置日期:</strong> ${stats.reset_date} (每日北京时间 00:00 自动重置)<br>
-                        <strong>注意:</strong> 页面访问统计主页访问，访问人数基于IP去重
+                        <strong>注意:</strong> 页面访问统计主页访问，访问人数基于IP
                     </div>
                 </div>
                 
