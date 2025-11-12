@@ -4,6 +4,7 @@
 // 添加了使用统计和自动更新检测功能
 // 增加了访问人数统计和IP日志记录
 // 增加了链接状态失败时发送Telegram通知
+// 增加了IP日志的国家和城市信息记录
 // ============================================
 
 export default {
@@ -106,16 +107,23 @@ export default {
   async scheduled(controller, env, ctx) {
     const KV = env.LINK_MANAGER_KV;
     
-    switch (controller.cron) {
-      // 每5分钟检查链接状态
-      case "*/5 * * * *":
-        await checkAndUpdateLinkStatus(KV);
-        break;
-        
-      // 每天UTC时间16:00（北京时间00:00）清零统计
-      case "0 16 * * *":
-        await resetDailyStats(KV);
-        break;
+    // 获取当前时间信息用于判断执行哪个任务
+    const now = new Date();
+    const beijingTime = convertToBeijingTime(now);
+    const beijingHours = new Date(beijingTime).getHours();
+    const beijingMinutes = new Date(beijingTime).getMinutes();
+    
+    console.log(`定时任务执行时间: ${beijingTime}, 小时: ${beijingHours}, 分钟: ${beijingMinutes}`);
+    
+    // 每5分钟检查链接状态（对应 Dashboard cron: */5 * * * *）
+    await checkAndUpdateLinkStatus(KV);
+    
+    // 每天北京时间00:00重置统计（对应 Dashboard cron: 0 16 * * *，UTC时间16:00 = 北京时间00:00）
+    if (beijingHours === 0 && beijingMinutes === 0) {
+      console.log('执行每日统计重置');
+      await resetDailyStats(KV);
+    } else {
+      console.log('跳过每日统计重置，当前不是北京时间00:00');
     }
   },
 };
@@ -170,34 +178,61 @@ async function recordPageView(KV, request) {
     await resetDailyStats(KV);
   }
   
-  // 获取客户端IP
-  const clientIP = getClientIP(request);
+  // 获取客户端IP和地理位置信息
+  const clientInfo = getClientInfo(request);
   
   // 记录页面访问次数
   const pageViewsKey = 'daily_page_views';
   const currentPageViews = parseInt(await KV.get(pageViewsKey) || '0');
   await KV.put(pageViewsKey, (currentPageViews + 1).toString());
   
-  // 记录访问IP日志
-  await recordIPLog(KV, clientIP);
+  // 记录访问IP日志（包含地理位置信息）
+  await recordIPLog(KV, clientInfo);
   
   // 记录去重访问人数
-  await recordUniqueVisitor(KV, clientIP, today);
+  await recordUniqueVisitor(KV, clientInfo.ip, today);
 }
 
-// 获取客户端IP
-function getClientIP(request) {
-  // 从 Cloudflare 头部获取真实客户端IP
-  return request.headers.get('CF-Connecting-IP') || 
-         request.headers.get('X-Forwarded-For') || 
-         request.headers.get('X-Real-IP') || 
-         'unknown';
+// 获取客户端信息和地理位置
+function getClientInfo(request) {
+  // 从 Cloudflare 头部获取真实客户端IP和地理位置
+  const clientIP = request.headers.get('CF-Connecting-IP') || 
+                   request.headers.get('X-Forwarded-For') || 
+                   request.headers.get('X-Real-IP') || 
+                   'unknown';
+  
+  // 从 Cloudflare 的 cf 对象获取地理位置信息
+  const country = request.cf?.country || '未知';
+  const city = request.cf?.city || '未知';
+  const region = request.cf?.region || '未知';
+  const regionCode = request.cf?.regionCode || '未知';
+  
+  return {
+    ip: clientIP,
+    country: country,
+    city: city,
+    region: region,
+    regionCode: regionCode
+  };
 }
 
-// 记录IP访问日志
-async function recordIPLog(KV, clientIP) {
+// 记录IP访问日志（包含地理位置信息）
+async function recordIPLog(KV, clientInfo) {
   const timestamp = convertToBeijingTime(new Date());
-  const logEntry = `${timestamp} - IP: ${clientIP}`;
+  
+  // 构建详细的日志条目
+  let logEntry = `${timestamp} - IP: ${clientInfo.ip}`;
+  
+  // 添加地理位置信息（如果可用）
+  if (clientInfo.country !== '未知') {
+    logEntry += ` - 国家: ${clientInfo.country}`;
+  }
+  if (clientInfo.city !== '未知') {
+    logEntry += ` - 城市: ${clientInfo.city}`;
+  }
+  if (clientInfo.region !== '未知' && clientInfo.region !== clientInfo.city) {
+    logEntry += ` - 地区: ${clientInfo.region}`;
+  }
   
   // 获取现有的日志（最多保留最近100条）
   const existingLogs = await KV.get('ip_access_logs');
@@ -243,8 +278,11 @@ async function checkAndUpdateLinkStatus(KV) {
   try {
     const config = await getConfigFromKV(KV);
     if (!config.SUBSCRIPTION_URL || config.SUBSCRIPTION_URL === 'https://xx') {
+      console.log('订阅链接未配置，跳过自动检查');
       return;
     }
+    
+    console.log(`开始自动检查链接: ${config.SUBSCRIPTION_URL}`);
     
     const response = await fetch(config.SUBSCRIPTION_URL, {
       method: 'HEAD',
@@ -1051,6 +1089,9 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             <div>
                 <div class="card">
                     <h2>访问IP日志 (最近100条)</h2>
+                    <div class="info-box">
+                        <strong>地理位置信息:</strong> 现在IP日志会记录访问者的国家和城市信息
+                    </div>
                     <div class="logs-container">
                         ${ipLogsHTML}
                     </div>
