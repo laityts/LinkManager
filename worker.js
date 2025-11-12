@@ -5,6 +5,10 @@
 // 增加了访问人数统计和IP日志记录
 // 增加了链接状态失败时发送Telegram通知
 // 增加了IP日志的国家和城市信息记录
+// 增加了定时任务日志发送到Telegram功能
+// 增加了忽略IP地址功能
+// 增加了每日清空IP日志功能
+// 修复了IPv6地址忽略不生效的问题
 // ============================================
 
 export default {
@@ -115,18 +119,74 @@ export default {
     
     console.log(`定时任务执行时间: ${beijingTime}, 小时: ${beijingHours}, 分钟: ${beijingMinutes}`);
     
+    // 构建定时任务日志
+    let cronLogs = [];
+    cronLogs.push(`🕒 <b>定时任务执行报告</b>`);
+    cronLogs.push(`执行时间: ${beijingTime}`);
+    
     // 每5分钟检查链接状态（对应 Dashboard cron: */5 * * * *）
-    await checkAndUpdateLinkStatus(KV);
+    const linkCheckResult = await checkAndUpdateLinkStatus(KV);
+    cronLogs.push(linkCheckResult);
     
     // 每天北京时间00:00重置统计（对应 Dashboard cron: 0 16 * * *，UTC时间16:00 = 北京时间00:00）
+    let resetResult = '';
     if (beijingHours === 0 && beijingMinutes === 0) {
       console.log('执行每日统计重置');
-      await resetDailyStats(KV);
+      resetResult = await resetDailyStats(KV);
+      cronLogs.push(resetResult);
+      
+      // 清空IP访问日志
+      const clearIPLogsResult = await clearIPLogs(KV);
+      cronLogs.push(clearIPLogsResult);
     } else {
-      console.log('跳过每日统计重置，当前不是北京时间00:00');
+      resetResult = '跳过每日统计重置，当前不是北京时间00:00';
+      console.log(resetResult);
+      cronLogs.push(resetResult);
     }
+    
+    // 获取当前统计信息
+    const stats = await getStats(KV);
+    cronLogs.push(`\n<b>📊 今日统计摘要</b>`);
+    cronLogs.push(`页面访问: ${stats.page_views} 次`);
+    cronLogs.push(`独立访客: ${stats.unique_visitors} 人`);
+    cronLogs.push(`复制次数: ${stats.copy_clicks} 次`);
+    cronLogs.push(`TG点击: ${stats.telegram_clicks} 次`);
+    
+    // 发送定时任务日志到Telegram
+    await sendCronReportToTelegram(KV, cronLogs);
   },
 };
+
+// 清空IP日志
+async function clearIPLogs(KV) {
+  try {
+    await KV.put('ip_access_logs', JSON.stringify([]));
+    console.log('IP日志已清空');
+    return '🗑️ IP访问日志已清空';
+  } catch (error) {
+    console.error('清空IP日志时出错:', error.message);
+    return '❌ IP日志清空失败: ' + error.message;
+  }
+}
+
+// 发送定时任务报告到Telegram
+async function sendCronReportToTelegram(KV, logs) {
+  try {
+    const message = logs.join('\n');
+    const success = await sendTelegramMessage(KV, message);
+    
+    if (success) {
+      console.log('定时任务报告发送成功');
+    } else {
+      console.log('定时任务报告发送失败');
+    }
+    
+    return success;
+  } catch (error) {
+    console.error('发送定时任务报告时出错:', error.message);
+    return false;
+  }
+}
 
 // 发送Telegram通知
 async function sendTelegramMessage(KV, message) {
@@ -168,6 +228,72 @@ async function sendTelegramMessage(KV, message) {
   }
 }
 
+// 检查是否为忽略的IP地址（修复IPv6支持）
+async function isIgnoredIP(KV, ip) {
+  try {
+    const ignoredIP = await KV.get('ignored_ip');
+    if (!ignoredIP) return false;
+    
+    // 标准化IP地址比较（处理IPv6格式差异）
+    const normalizeIP = (ip) => {
+      if (!ip) return '';
+      // 去除前后空格并转换为小写
+      ip = ip.trim().toLowerCase();
+      
+      // 对于IPv6地址，进行标准化处理
+      if (ip.includes(':')) {
+        // 简化的IPv6标准化：处理缩写和格式差异
+        try {
+          // 将IPv6地址分解为各个部分
+          const parts = ip.split(':');
+          let expandedParts = [];
+          let foundEmpty = false;
+          
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i] === '') {
+              if (!foundEmpty) {
+                // 遇到 ::，填充零
+                const zeroCount = 8 - (parts.length - 1);
+                for (let j = 0; j < zeroCount; j++) {
+                  expandedParts.push('0000');
+                }
+                foundEmpty = true;
+              }
+            } else {
+              // 将每部分填充到4位十六进制
+              expandedParts.push(parts[i].padStart(4, '0'));
+            }
+          }
+          
+          // 如果IPv6地址没有::缩写，但部分数不足8，则在末尾补零
+          if (!foundEmpty && expandedParts.length < 8) {
+            while (expandedParts.length < 8) {
+              expandedParts.push('0000');
+            }
+          }
+          
+          return expandedParts.join(':');
+        } catch (e) {
+          console.error('IPv6标准化错误:', e);
+          return ip; // 如果处理失败，返回原始IP
+        }
+      }
+      
+      return ip; // IPv4地址直接返回
+    };
+    
+    const normalizedIgnoredIP = normalizeIP(ignoredIP);
+    const normalizedClientIP = normalizeIP(ip);
+    
+    console.log(`检查IP忽略: 配置IP="${ignoredIP}" -> "${normalizedIgnoredIP}", 客户端IP="${ip}" -> "${normalizedClientIP}", 匹配=${normalizedIgnoredIP === normalizedClientIP}`);
+    
+    return normalizedIgnoredIP === normalizedClientIP;
+  } catch (error) {
+    console.error('检查忽略IP时出错:', error.message);
+    return false;
+  }
+}
+
 // 记录页面访问统计（包含IP记录和统计）
 async function recordPageView(KV, request) {
   const today = getBeijingDateString();
@@ -180,6 +306,17 @@ async function recordPageView(KV, request) {
   
   // 获取客户端IP和地理位置信息
   const clientInfo = getClientInfo(request);
+  
+  console.log(`接收到访问: IP=${clientInfo.ip}, 国家=${clientInfo.country}, 城市=${clientInfo.city}`);
+  
+  // 检查是否为忽略的IP地址
+  const shouldIgnore = await isIgnoredIP(KV, clientInfo.ip);
+  if (shouldIgnore) {
+    console.log(`✅ 忽略IP ${clientInfo.ip} 的访问数据`);
+    return;
+  }
+  
+  console.log(`✅ 记录IP ${clientInfo.ip} 的访问数据`);
   
   // 记录页面访问次数
   const pageViewsKey = 'daily_page_views';
@@ -261,6 +398,13 @@ async function saveIPLogToKV(KV, logEntry) {
 
 // 记录访问人数
 async function recordUniqueVisitor(KV, clientIP, today) {
+  // 检查是否为忽略的IP地址
+  const shouldIgnore = await isIgnoredIP(KV, clientIP);
+  if (shouldIgnore) {
+    console.log(`✅ 忽略IP ${clientIP} 的唯一访客记录`);
+    return;
+  }
+  
   const uniqueVisitorsKey = `daily_unique_visitors_${today}`;
   
   // 获取今天的访问者集合
@@ -278,13 +422,14 @@ async function recordUniqueVisitor(KV, clientIP, today) {
   await KV.put(uniqueVisitorsKey, JSON.stringify(Array.from(visitorsSet)));
 }
 
-// 自动检查并更新链接状态（包含Telegram通知）
+// 自动检查并更新链接状态（包含Telegram通知）- 修改为返回结果字符串
 async function checkAndUpdateLinkStatus(KV) {
   try {
     const config = await getConfigFromKV(KV);
     if (!config.SUBSCRIPTION_URL || config.SUBSCRIPTION_URL === 'https://xx') {
-      console.log('订阅链接未配置，跳过自动检查');
-      return;
+      const result = '❌ 订阅链接未配置，跳过自动检查';
+      console.log(result);
+      return result;
     }
     
     console.log(`开始自动检查链接: ${config.SUBSCRIPTION_URL}`);
@@ -301,7 +446,9 @@ async function checkAndUpdateLinkStatus(KV) {
     await KV.put('auto_check_status', isActive ? 'active' : 'inactive');
     await KV.put('last_auto_check', convertToBeijingTime(new Date()));
     
-    console.log(`自动检查完成: ${config.SUBSCRIPTION_URL} - 状态: ${isActive ? '正常' : '异常'}`);
+    const statusText = isActive ? '正常' : '异常';
+    let result = `✅ 链接检查完成: ${statusText}`;
+    console.log(`自动检查完成: ${config.SUBSCRIPTION_URL} - 状态: ${statusText}`);
     
     // 如果状态从正常变为异常，发送Telegram通知
     if (previousStatus === 'active' && !isActive) {
@@ -312,6 +459,7 @@ async function checkAndUpdateLinkStatus(KV) {
                      `请及时检查服务状态。`;
       
       await sendTelegramMessage(KV, message);
+      result += ' 🔴 (已发送异常通知)';
       console.log('已发送链接异常通知');
     }
     
@@ -324,8 +472,11 @@ async function checkAndUpdateLinkStatus(KV) {
                      `服务已恢复正常。`;
       
       await sendTelegramMessage(KV, message);
+      result += ' 🟢 (已发送恢复通知)';
       console.log('已发送链接恢复通知');
     }
+    
+    return result;
     
   } catch (error) {
     const previousStatus = await KV.get('auto_check_status');
@@ -333,6 +484,8 @@ async function checkAndUpdateLinkStatus(KV) {
     await KV.put('auto_check_status', 'error');
     await KV.put('last_auto_check', convertToBeijingTime(new Date()));
     console.error('自动检查失败:', error.message);
+    
+    let result = `❌ 链接检查失败: ${error.message}`;
     
     // 如果之前状态正常，发送检查失败通知
     if (previousStatus === 'active') {
@@ -344,26 +497,59 @@ async function checkAndUpdateLinkStatus(KV) {
                      `请检查网络连接或服务状态。`;
       
       await sendTelegramMessage(KV, message);
+      result += ' 🔴 (已发送失败通知)';
       console.log('已发送检查失败通知');
     }
+    
+    return result;
   }
 }
 
-// 重置每日统计
+// 重置每日统计 - 修改为返回结果字符串
 async function resetDailyStats(KV) {
-  const today = getBeijingDateString();
-  await KV.put('stats_reset_date', today);
-  await KV.put('daily_page_views', '0');
-  await KV.put('daily_copy_clicks', '0');
-  await KV.put('daily_telegram_clicks', '0');
-  
-  // 不清除IP日志，只清除前一天的unique visitors
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = getBeijingDateString(yesterday);
-  await KV.delete(`daily_unique_visitors_${yesterdayStr}`);
-  
-  console.log(`每日统计已重置: ${today}`);
+  try {
+    const today = getBeijingDateString();
+    
+    // 获取重置前的统计信息用于报告
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = getBeijingDateString(yesterday);
+    
+    const yesterdayPageViews = parseInt(await KV.get('daily_page_views') || '0');
+    const yesterdayCopyClicks = parseInt(await KV.get('daily_copy_clicks') || '0');
+    const yesterdayTelegramClicks = parseInt(await KV.get('daily_telegram_clicks') || '0');
+    
+    // 获取昨天的独立访客数
+    const yesterdayVisitorsKey = `daily_unique_visitors_${yesterdayStr}`;
+    const yesterdayVisitorsData = await KV.get(yesterdayVisitorsKey);
+    const yesterdayUniqueVisitors = yesterdayVisitorsData ? JSON.parse(yesterdayVisitorsData).length : 0;
+    
+    // 执行重置
+    await KV.put('stats_reset_date', today);
+    await KV.put('daily_page_views', '0');
+    await KV.put('daily_copy_clicks', '0');
+    await KV.put('daily_telegram_clicks', '0');
+    
+    // 不清除IP日志，只清除前一天的unique visitors
+    await KV.delete(yesterdayVisitorsKey);
+    
+    console.log(`每日统计已重置: ${today}`);
+    
+    // 构建重置报告
+    let result = `🔄 <b>每日统计已重置</b>\n\n`;
+    result += `重置时间: ${today}\n\n`;
+    result += `<b>昨日统计摘要:</b>\n`;
+    result += `页面访问: ${yesterdayPageViews} 次\n`;
+    result += `独立访客: ${yesterdayUniqueVisitors} 人\n`;
+    result += `复制次数: ${yesterdayCopyClicks} 次\n`;
+    result += `TG点击: ${yesterdayTelegramClicks} 次`;
+    
+    return result;
+    
+  } catch (error) {
+    console.error('重置统计时出错:', error.message);
+    return `❌ 统计重置失败: ${error.message}`;
+  }
 }
 
 // 记录统计信息（用于复制和TG点击）
@@ -405,6 +591,9 @@ async function getStats(KV) {
   const chatId = await KV.get('telegram_chat_id');
   const telegramConfigured = !!(botToken && chatId);
   
+  // 获取忽略的IP地址
+  const ignoredIP = await KV.get('ignored_ip') || '未设置';
+  
   return {
     page_views: parseInt(await KV.get('daily_page_views') || '0'),
     copy_clicks: parseInt(await KV.get('daily_copy_clicks') || '0'),
@@ -412,6 +601,7 @@ async function getStats(KV) {
     unique_visitors: uniqueVisitors,
     ip_logs: ipLogs,
     telegram_configured: telegramConfigured,
+    ignored_ip: ignoredIP,
     reset_date: lastResetDate || today
   };
 }
@@ -497,12 +687,14 @@ async function getConfigFromKV(KV) {
   const telegramGroup = await KV.get('telegram_group');
   const telegramBotToken = await KV.get('telegram_bot_token');
   const telegramChatId = await KV.get('telegram_chat_id');
+  const ignoredIP = await KV.get('ignored_ip');
   
   return {
     SUBSCRIPTION_URL: subscriptionUrl || 'https://xx',
     TELEGRAM_GROUP: telegramGroup || 'https://t.me',
     TELEGRAM_BOT_TOKEN: telegramBotToken || '',
-    TELEGRAM_CHAT_ID: telegramChatId || ''
+    TELEGRAM_CHAT_ID: telegramChatId || '',
+    IGNORED_IP: ignoredIP || ''
   };
 }
 
@@ -675,12 +867,14 @@ async function handleUpdateConfig(request, KV) {
     const telegramGroup = formData.get('telegram_group');
     const telegramBotToken = formData.get('telegram_bot_token');
     const telegramChatId = formData.get('telegram_chat_id');
+    const ignoredIP = formData.get('ignored_ip');
     
     // 更新配置到KV
     await KV.put('subscription_url', subscriptionUrl);
     await KV.put('telegram_group', telegramGroup);
     await KV.put('telegram_bot_token', telegramBotToken);
     await KV.put('telegram_chat_id', telegramChatId);
+    await KV.put('ignored_ip', ignoredIP);
     
     // 更新最后修改时间为当前北京时间
     const currentBeijingTime = convertToBeijingTime(new Date());
@@ -878,7 +1072,7 @@ function getLoginHTML() {
 </html>`;
 }
 
-// 管理面板HTML (增强版，添加Telegram通知配置)
+// 管理面板HTML (增强版，添加忽略IP配置)
 function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, stats) {
   const statusText = {
     'active': '正常',
@@ -898,6 +1092,11 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
   const telegramStatus = stats.telegram_configured ? 
     '<span style="color: #10b981;">✓ 已配置</span>' : 
     '<span style="color: #ef4444;">✗ 未配置</span>';
+
+  // 忽略IP状态
+  const ignoredIPStatus = stats.ignored_ip && stats.ignored_ip !== '未设置' ? 
+    `<span style="color: #10b981;">✓ 已设置: ${stats.ignored_ip}</span>` : 
+    '<span style="color: #ef4444;">✗ 未设置</span>';
 
   // 构建IP日志HTML
   const ipLogsHTML = stats.ip_logs && stats.ip_logs.length > 0 
@@ -1029,7 +1228,8 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                     </div>
                     <div class="info-box">
                         <strong>统计重置日期:</strong> ${stats.reset_date} (每日北京时间 00:00 自动重置)<br>
-                        <strong>注意:</strong> 页面访问统计主页访问，访问人数基于IP
+                        <strong>忽略IP设置:</strong> ${ignoredIPStatus}<br>
+                        <strong>注意:</strong> 页面访问统计主页访问，访问人数基于IP，忽略IP的访问不会被记录
                     </div>
                 </div>
                 
@@ -1083,6 +1283,17 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                             </div>
                         </div>
                         
+                        <h3>忽略IP配置</h3>
+                        <div class="form-group">
+                            <label for="ignored_ip">忽略的IP地址</label>
+                            <input type="text" id="ignored_ip" name="ignored_ip" 
+                                   value="${config.IGNORED_IP}" 
+                                   placeholder="例如: 192.168.1.1 或 2a06:98c0:3600::103">
+                            <div class="help-text">
+                                设置此IP后，该IP的访问将不会被记录在统计和IP日志中（支持IPv4和IPv6）
+                            </div>
+                        </div>
+                        
                         <button type="submit">更新配置</button>
                         <button type="button" onclick="testTelegram()" class="button-success">测试通知</button>
                         <button type="button" onclick="window.location.href='/'">返回主页</button>
@@ -1095,7 +1306,9 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                 <div class="card">
                     <h2>访问IP日志 (最近100条)</h2>
                     <div class="info-box">
-                        <strong>地理位置信息:</strong> 现在IP日志会记录访问者的国家和城市信息
+                        <strong>地理位置信息:</strong> 现在IP日志会记录访问者的国家和城市信息<br>
+                        <strong>忽略IP:</strong> ${stats.ignored_ip} 的访问不会被记录<br>
+                        <strong>IPv6支持:</strong> 已修复IPv6地址忽略功能
                     </div>
                     <div class="logs-container">
                         ${ipLogsHTML}
@@ -1368,12 +1581,6 @@ function getHTML(subscriptionUrl, telegramGroup) {
 
         .button-cyan::before {
             content: "✈";
-        }
-
-        .footer {
-            margin-top: 40px;
-            color: #a0aec0;
-            font-size: 13px;
         }
 
         .copy-feedback {
