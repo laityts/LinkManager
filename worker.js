@@ -1925,6 +1925,18 @@ function getHTML(subscriptionUrl, telegramGroup) {
             transform: scale(0.98);
         }
 
+        .button::before {
+            font-size: 18px;
+        }
+
+        .button-purple::before {
+            content: "📄";
+        }
+
+        .button-cyan::before {
+            content: "✈";
+        }
+
         .copy-feedback {
             position: absolute;
             top: 0;
