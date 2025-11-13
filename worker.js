@@ -1,170 +1,99 @@
 // ============================================
 // LinkManager - Cloudflare Workers
 // KV绑定名称: LINK_MANAGER_KV
-// 添加了使用统计和自动更新检测功能
-// 增加了访问人数统计和IP日志记录
-// 增加了链接状态失败时发送Telegram通知
-// 增加了IP日志的国家和城市信息记录
-// 增加了定时任务日志发送到Telegram功能
-// 增加了忽略IP地址功能
-// 增加了每日清空IP日志功能
-// 修复了IPv6地址忽略不生效的问题
 // ============================================
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    
-    // KV 绑定
     const KV = env.LINK_MANAGER_KV;
-    
-    // 管理面板路由
-    if (url.pathname === '/admin') {
-      return handleAdminPanel(request, KV);
-    }
-    
-    // 管理API路由
-    if (url.pathname === '/admin/api/setup') {
-      return handleAdminSetup(request, KV);
-    }
-    
-    if (url.pathname === '/admin/api/login') {
-      return handleAdminLogin(request, KV);
-    }
-    
-    if (url.pathname === '/admin/api/update-config') {
-      return handleUpdateConfig(request, KV);
-    }
-    
-    if (url.pathname === '/admin/api/logout') {
-      return handleAdminLogout(request, KV);
+
+    // 路由处理
+    const routes = {
+      '/admin': () => handleAdminPanel(request, KV),
+      '/admin/api/setup': () => handleAdminSetup(request, KV),
+      '/admin/api/login': () => handleAdminLogin(request, KV),
+      '/admin/api/update-config': () => handleUpdateConfig(request, KV),
+      '/admin/api/logout': () => handleAdminLogout(request, KV),
+      '/api/stats': () => handleStats(request, KV),
+      '/admin/api/test-telegram': () => handleTestTelegram(request, KV),
+      '/api/check-link': async () => {
+        const CONFIG = await getConfigFromKV(KV);
+        return handleCheckLink(CONFIG, KV);
+      }
+    };
+
+    // 执行路由处理
+    const routeHandler = routes[url.pathname];
+    if (routeHandler) {
+      return await routeHandler();
     }
 
-    // 统计API路由
-    if (url.pathname === '/api/stats') {
-      return handleStats(request, KV);
-    }
-    
-    // 测试Telegram通知
-    if (url.pathname === '/admin/api/test-telegram') {
-      return handleTestTelegram(request, KV);
-    }
-    
-    // 从KV读取配置
-    const CONFIG = await getConfigFromKV(KV);
-    
-    // API 端点：检查链接状态和更新时间
-    if (url.pathname === '/api/check-link') {
-      try {
-        const response = await fetch(CONFIG.SUBSCRIPTION_URL, {
-          method: 'HEAD',
-          signal: AbortSignal.timeout(5000)
-        });
-        
-        const isActive = response.ok || (response.status >= 200 && response.status < 400);
-        
-        // 从KV获取最后修改时间
-        let lastModified = await KV.get('last_updated');
-        if (!lastModified) {
-          // 如果没有存储的时间，使用当前时间
-          lastModified = convertToBeijingTime(new Date());
-        }
-        
-        return new Response(JSON.stringify({ 
-          active: isActive,
-          status: response.status,
-          lastModified: lastModified
-        }), {
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      } catch (error) {
-        return new Response(JSON.stringify({ 
-          active: false,
-          error: error.message,
-          lastModified: null
-        }), {
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-    }
-    
-    // 只统计主页访问
+    // 主页访问统计
     if (url.pathname === '/') {
       await recordPageView(KV, request);
     }
-    
-    // 返回 HTML 页面
+
+    // 返回主页
+    const CONFIG = await getConfigFromKV(KV);
     return new Response(getHTML(CONFIG.SUBSCRIPTION_URL, CONFIG.TELEGRAM_GROUP), {
-      headers: {
-        'Content-Type': 'text/html;charset=UTF-8',
-      },
+      headers: { 'Content-Type': 'text/html;charset=UTF-8' }
     });
   },
 
-  // 定时任务 - 自动更新检测和统计清零
   async scheduled(controller, env, ctx) {
     const KV = env.LINK_MANAGER_KV;
-    
-    // 获取当前时间信息用于判断执行哪个任务
     const now = new Date();
     const beijingTime = convertToBeijingTime(now);
     const beijingHours = new Date(beijingTime).getHours();
     const beijingMinutes = new Date(beijingTime).getMinutes();
-    
-    console.log(`定时任务执行时间: ${beijingTime}, 小时: ${beijingHours}, 分钟: ${beijingMinutes}`);
-    
-    // 构建定时任务日志
-    let cronLogs = [];
-    cronLogs.push(`🕒 <b>定时任务执行报告</b>`);
-    cronLogs.push(`执行时间: ${beijingTime}`);
-    
-    // 每5分钟检查链接状态（对应 Dashboard cron: */5 * * * *）
+
+    console.log(`定时任务执行: ${beijingTime}, 小时: ${beijingHours}, 分钟: ${beijingMinutes}`);
+
+    const cronLogs = [
+      `🕒 <b>定时任务执行报告</b>`,
+      `执行时间: ${beijingTime}`
+    ];
+
+    // 每5分钟检查链接状态
     const linkCheckResult = await checkAndUpdateLinkStatus(KV);
     cronLogs.push(linkCheckResult);
-    
-    // 每天北京时间00:00重置统计（对应 Dashboard cron: 0 16 * * *，UTC时间16:00 = 北京时间00:00）
+
+    // 每天北京时间00:00重置统计
     let resetResult = '';
     if (beijingHours === 0 && beijingMinutes === 0) {
-      console.log('执行每日统计重置');
       resetResult = await resetDailyStats(KV);
       cronLogs.push(resetResult);
       
-      // 清空IP访问日志
       const clearIPLogsResult = await clearIPLogs(KV);
       cronLogs.push(clearIPLogsResult);
     } else {
       resetResult = '跳过每日统计重置，当前不是北京时间00:00';
-      console.log(resetResult);
       cronLogs.push(resetResult);
     }
-    
-    // 获取当前统计信息
+
+    // 统计摘要
     const stats = await getStats(KV);
-    cronLogs.push(`\n<b>📊 今日统计摘要</b>`);
-    cronLogs.push(`页面访问: ${stats.page_views} 次`);
-    cronLogs.push(`独立访客: ${stats.unique_visitors} 人`);
-    cronLogs.push(`复制次数: ${stats.copy_clicks} 次`);
-    cronLogs.push(`TG点击: ${stats.telegram_clicks} 次`);
-    
-    // 发送定时任务日志到Telegram
+    cronLogs.push(
+      `\n<b>📊 今日统计摘要</b>`,
+      `页面访问: ${stats.page_views} 次`,
+      `独立访客: ${stats.unique_visitors} 人`,
+      `复制次数: ${stats.copy_clicks} 次`,
+      `TG点击: ${stats.telegram_clicks} 次`
+    );
+
     await sendCronReportToTelegram(KV, cronLogs);
-  },
+  }
 };
+
+// ==================== 工具函数 ====================
 
 // 清空IP日志
 async function clearIPLogs(KV) {
   try {
     await KV.put('ip_access_logs', JSON.stringify([]));
-    console.log('IP日志已清空');
     return '🗑️ IP访问日志已清空';
   } catch (error) {
-    console.error('清空IP日志时出错:', error.message);
     return '❌ IP日志清空失败: ' + error.message;
   }
 }
@@ -173,15 +102,7 @@ async function clearIPLogs(KV) {
 async function sendCronReportToTelegram(KV, logs) {
   try {
     const message = logs.join('\n');
-    const success = await sendTelegramMessage(KV, message);
-    
-    if (success) {
-      console.log('定时任务报告发送成功');
-    } else {
-      console.log('定时任务报告发送失败');
-    }
-    
-    return success;
+    return await sendTelegramMessage(KV, message);
   } catch (error) {
     console.error('发送定时任务报告时出错:', error.message);
     return false;
@@ -200,12 +121,9 @@ async function sendTelegramMessage(KV, message) {
     }
     
     const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
@@ -214,37 +132,25 @@ async function sendTelegramMessage(KV, message) {
     });
     
     const result = await response.json();
-    
-    if (result.ok) {
-      console.log('Telegram通知发送成功');
-      return true;
-    } else {
-      console.error('Telegram通知发送失败:', result.description);
-      return false;
-    }
+    return result.ok;
   } catch (error) {
     console.error('发送Telegram通知时出错:', error.message);
     return false;
   }
 }
 
-// 检查是否为忽略的IP地址（修复IPv6支持）
+// 检查是否为忽略的IP地址
 async function isIgnoredIP(KV, ip) {
   try {
     const ignoredIP = await KV.get('ignored_ip');
     if (!ignoredIP) return false;
     
-    // 标准化IP地址比较（处理IPv6格式差异）
     const normalizeIP = (ip) => {
       if (!ip) return '';
-      // 去除前后空格并转换为小写
       ip = ip.trim().toLowerCase();
       
-      // 对于IPv6地址，进行标准化处理
       if (ip.includes(':')) {
-        // 简化的IPv6标准化：处理缩写和格式差异
         try {
-          // 将IPv6地址分解为各个部分
           const parts = ip.split(':');
           let expandedParts = [];
           let foundEmpty = false;
@@ -252,7 +158,6 @@ async function isIgnoredIP(KV, ip) {
           for (let i = 0; i < parts.length; i++) {
             if (parts[i] === '') {
               if (!foundEmpty) {
-                // 遇到 ::，填充零
                 const zeroCount = 8 - (parts.length - 1);
                 for (let j = 0; j < zeroCount; j++) {
                   expandedParts.push('0000');
@@ -260,12 +165,10 @@ async function isIgnoredIP(KV, ip) {
                 foundEmpty = true;
               }
             } else {
-              // 将每部分填充到4位十六进制
               expandedParts.push(parts[i].padStart(4, '0'));
             }
           }
           
-          // 如果IPv6地址没有::缩写，但部分数不足8，则在末尾补零
           if (!foundEmpty && expandedParts.length < 8) {
             while (expandedParts.length < 8) {
               expandedParts.push('0000');
@@ -274,165 +177,115 @@ async function isIgnoredIP(KV, ip) {
           
           return expandedParts.join(':');
         } catch (e) {
-          console.error('IPv6标准化错误:', e);
-          return ip; // 如果处理失败，返回原始IP
+          return ip;
         }
       }
       
-      return ip; // IPv4地址直接返回
+      return ip;
     };
     
-    const normalizedIgnoredIP = normalizeIP(ignoredIP);
-    const normalizedClientIP = normalizeIP(ip);
-    
-    console.log(`检查IP忽略: 配置IP="${ignoredIP}" -> "${normalizedIgnoredIP}", 客户端IP="${ip}" -> "${normalizedClientIP}", 匹配=${normalizedIgnoredIP === normalizedClientIP}`);
-    
-    return normalizedIgnoredIP === normalizedClientIP;
+    return normalizeIP(ignoredIP) === normalizeIP(ip);
   } catch (error) {
-    console.error('检查忽略IP时出错:', error.message);
     return false;
   }
 }
 
-// 记录页面访问统计（包含IP记录和统计）
+// 记录页面访问统计
 async function recordPageView(KV, request) {
   const today = getBeijingDateString();
   const lastResetDate = await KV.get('stats_reset_date');
   
-  // 如果日期变化，自动重置统计
   if (lastResetDate !== today) {
     await resetDailyStats(KV);
   }
   
-  // 获取客户端IP和地理位置信息
   const clientInfo = getClientInfo(request);
-  
-  console.log(`接收到访问: IP=${clientInfo.ip}, 国家=${clientInfo.country}, 城市=${clientInfo.city}`);
-  
-  // 检查是否为忽略的IP地址
   const shouldIgnore = await isIgnoredIP(KV, clientInfo.ip);
+  
   if (shouldIgnore) {
     console.log(`✅ 忽略IP ${clientInfo.ip} 的访问数据`);
     return;
   }
-  
-  console.log(`✅ 记录IP ${clientInfo.ip} 的访问数据`);
   
   // 记录页面访问次数
   const pageViewsKey = 'daily_page_views';
   const currentPageViews = parseInt(await KV.get(pageViewsKey) || '0');
   await KV.put(pageViewsKey, (currentPageViews + 1).toString());
   
-  // 记录访问IP日志（包含地理位置信息）
+  // 记录访问日志和独立访客
   await recordIPLog(KV, clientInfo);
-  
-  // 记录访问人数
   await recordUniqueVisitor(KV, clientInfo.ip, today);
 }
 
-// 获取客户端信息和地理位置
+// 获取客户端信息
 function getClientInfo(request) {
-  // 从 Cloudflare 头部获取真实客户端IP和地理位置
   const clientIP = request.headers.get('CF-Connecting-IP') || 
                    request.headers.get('X-Forwarded-For') || 
                    request.headers.get('X-Real-IP') || 
                    'unknown';
   
-  // 从 Cloudflare 的 cf 对象获取地理位置和网络信息
   const country = request.cf?.country || '未知';
   const city = request.cf?.city || '未知';
   const region = request.cf?.region || '未知';
-  const regionCode = request.cf?.regionCode || '未知';
   const asn = request.cf?.asn || '未知';
   const asOrganization = request.cf?.asOrganization || '未知';
-  const isp = asOrganization !== '未知' ? asOrganization : '未知';
   
   return {
     ip: clientIP,
     country: country,
     city: city,
     region: region,
-    regionCode: regionCode,
     asn: asn,
-    isp: isp
+    isp: asOrganization !== '未知' ? asOrganization : '未知'
   };
 }
 
-// 记录IP访问日志（包含地理位置和网络信息）- 多行格式
+// 记录IP访问日志
 async function recordIPLog(KV, clientInfo) {
   const timestamp = convertToBeijingTime(new Date());
+  const logEntry = `${timestamp}\n` +
+                  `IP 地址: ${clientInfo.ip}\n` +
+                  `国家: ${clientInfo.country}\n` +
+                  `城市: ${clientInfo.city}\n` +
+                  `ISP: ${clientInfo.isp}\n` +
+                  `ASN: ${clientInfo.asn}`;
   
-  // 构建多行日志条目，符合要求的格式
-  let logEntry = `${timestamp}\n` +
-                `IP 地址: ${clientInfo.ip}\n` +
-                `国家: ${clientInfo.country}\n` +
-                `城市: ${clientInfo.city}\n` +
-                `ISP: ${clientInfo.isp}\n` +
-                `ASN: ${clientInfo.asn}`;
-  
-  // 保存回KV
   await saveIPLogToKV(KV, logEntry);
 }
 
-// 保存IP日志到KV（分离出来便于维护）
+// 保存IP日志到KV
 async function saveIPLogToKV(KV, logEntry) {
-  // 获取现有的日志（最多保留最近100条）
   const existingLogs = await KV.get('ip_access_logs');
-  let logsArray = [];
+  let logsArray = existingLogs ? JSON.parse(existingLogs) : [];
   
-  if (existingLogs) {
-    logsArray = JSON.parse(existingLogs);
-  }
-  
-  // 添加新日志条目
   logsArray.unshift(logEntry);
-  
-  // 限制日志数量为100条
   if (logsArray.length > 100) {
     logsArray = logsArray.slice(0, 100);
   }
   
-  // 保存回KV
   await KV.put('ip_access_logs', JSON.stringify(logsArray));
 }
 
-// 记录访问人数
+// 记录独立访客
 async function recordUniqueVisitor(KV, clientIP, today) {
-  // 检查是否为忽略的IP地址
   const shouldIgnore = await isIgnoredIP(KV, clientIP);
-  if (shouldIgnore) {
-    console.log(`✅ 忽略IP ${clientIP} 的唯一访客记录`);
-    return;
-  }
-  
+  if (shouldIgnore) return;
+
   const uniqueVisitorsKey = `daily_unique_visitors_${today}`;
-  
-  // 获取今天的访问者集合
   const existingVisitors = await KV.get(uniqueVisitorsKey);
-  let visitorsSet = new Set();
+  let visitorsSet = existingVisitors ? new Set(JSON.parse(existingVisitors)) : new Set();
   
-  if (existingVisitors) {
-    visitorsSet = new Set(JSON.parse(existingVisitors));
-  }
-  
-  // 添加当前IP
   visitorsSet.add(clientIP);
-  
-  // 保存回KV
   await KV.put(uniqueVisitorsKey, JSON.stringify(Array.from(visitorsSet)));
 }
 
-// 自动检查并更新链接状态（包含Telegram通知）- 修改为返回结果字符串
+// 检查链接状态
 async function checkAndUpdateLinkStatus(KV) {
   try {
     const config = await getConfigFromKV(KV);
     if (!config.SUBSCRIPTION_URL || config.SUBSCRIPTION_URL === 'https://xx') {
-      const result = '❌ 订阅链接未配置，跳过自动检查';
-      console.log(result);
-      return result;
+      return '❌ 订阅链接未配置，跳过自动检查';
     }
-    
-    console.log(`开始自动检查链接: ${config.SUBSCRIPTION_URL}`);
     
     const response = await fetch(config.SUBSCRIPTION_URL, {
       method: 'HEAD',
@@ -442,15 +295,13 @@ async function checkAndUpdateLinkStatus(KV) {
     const isActive = response.ok || (response.status >= 200 && response.status < 400);
     const previousStatus = await KV.get('auto_check_status');
     
-    // 存储链接状态和检查时间
     await KV.put('auto_check_status', isActive ? 'active' : 'inactive');
     await KV.put('last_auto_check', convertToBeijingTime(new Date()));
     
     const statusText = isActive ? '正常' : '异常';
     let result = `✅ 链接检查完成: ${statusText}`;
-    console.log(`自动检查完成: ${config.SUBSCRIPTION_URL} - 状态: ${statusText}`);
     
-    // 如果状态从正常变为异常，发送Telegram通知
+    // 状态变化通知
     if (previousStatus === 'active' && !isActive) {
       const message = `🔴 <b>订阅链接异常</b>\n\n` +
                      `链接: ${config.SUBSCRIPTION_URL}\n` +
@@ -460,10 +311,8 @@ async function checkAndUpdateLinkStatus(KV) {
       
       await sendTelegramMessage(KV, message);
       result += ' 🔴 (已发送异常通知)';
-      console.log('已发送链接异常通知');
     }
     
-    // 如果状态从异常恢复为正常，发送恢复通知
     if (previousStatus === 'inactive' && isActive) {
       const message = `🟢 <b>订阅链接已恢复</b>\n\n` +
                      `链接: ${config.SUBSCRIPTION_URL}\n` +
@@ -473,21 +322,17 @@ async function checkAndUpdateLinkStatus(KV) {
       
       await sendTelegramMessage(KV, message);
       result += ' 🟢 (已发送恢复通知)';
-      console.log('已发送链接恢复通知');
     }
     
     return result;
     
   } catch (error) {
     const previousStatus = await KV.get('auto_check_status');
-    
     await KV.put('auto_check_status', 'error');
     await KV.put('last_auto_check', convertToBeijingTime(new Date()));
-    console.error('自动检查失败:', error.message);
     
     let result = `❌ 链接检查失败: ${error.message}`;
     
-    // 如果之前状态正常，发送检查失败通知
     if (previousStatus === 'active') {
       const config = await getConfigFromKV(KV);
       const message = `🔴 <b>订阅链接检查失败</b>\n\n` +
@@ -498,28 +343,64 @@ async function checkAndUpdateLinkStatus(KV) {
       
       await sendTelegramMessage(KV, message);
       result += ' 🔴 (已发送失败通知)';
-      console.log('已发送检查失败通知');
     }
     
     return result;
   }
 }
 
-// 重置每日统计 - 修改为返回结果字符串
+// 处理链接检查API
+async function handleCheckLink(CONFIG, KV) {
+  try {
+    const response = await fetch(CONFIG.SUBSCRIPTION_URL, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5000)
+    });
+    
+    const isActive = response.ok || (response.status >= 200 && response.status < 400);
+    let lastModified = await KV.get('last_updated');
+    
+    if (!lastModified) {
+      lastModified = convertToBeijingTime(new Date());
+    }
+    
+    return new Response(JSON.stringify({ 
+      active: isActive,
+      status: response.status,
+      lastModified: lastModified
+    }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ 
+      active: false,
+      error: error.message,
+      lastModified: null
+    }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+  }
+}
+
+// 重置每日统计
 async function resetDailyStats(KV) {
   try {
     const today = getBeijingDateString();
-    
-    // 获取重置前的统计信息用于报告
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayStr = getBeijingDateString(yesterday);
     
+    // 获取昨日统计
     const yesterdayPageViews = parseInt(await KV.get('daily_page_views') || '0');
     const yesterdayCopyClicks = parseInt(await KV.get('daily_copy_clicks') || '0');
     const yesterdayTelegramClicks = parseInt(await KV.get('daily_telegram_clicks') || '0');
     
-    // 获取昨天的独立访客数
     const yesterdayVisitorsKey = `daily_unique_visitors_${yesterdayStr}`;
     const yesterdayVisitorsData = await KV.get(yesterdayVisitorsKey);
     const yesterdayUniqueVisitors = yesterdayVisitorsData ? JSON.parse(yesterdayVisitorsData).length : 0;
@@ -529,13 +410,8 @@ async function resetDailyStats(KV) {
     await KV.put('daily_page_views', '0');
     await KV.put('daily_copy_clicks', '0');
     await KV.put('daily_telegram_clicks', '0');
-    
-    // 不清除IP日志，只清除前一天的unique visitors
     await KV.delete(yesterdayVisitorsKey);
     
-    console.log(`每日统计已重置: ${today}`);
-    
-    // 构建重置报告
     let result = `🔄 <b>每日统计已重置</b>\n\n`;
     result += `重置时间: ${today}\n\n`;
     result += `<b>昨日统计摘要:</b>\n`;
@@ -547,17 +423,15 @@ async function resetDailyStats(KV) {
     return result;
     
   } catch (error) {
-    console.error('重置统计时出错:', error.message);
     return `❌ 统计重置失败: ${error.message}`;
   }
 }
 
-// 记录统计信息（用于复制和TG点击）
+// 记录统计事件
 async function recordStat(KV, statType) {
   const today = getBeijingDateString();
   const lastResetDate = await KV.get('stats_reset_date');
   
-  // 如果日期变化，自动重置统计
   if (lastResetDate !== today) {
     await resetDailyStats(KV);
   }
@@ -572,26 +446,19 @@ async function getStats(KV) {
   const today = getBeijingDateString();
   const lastResetDate = await KV.get('stats_reset_date');
   
-  // 如果日期变化，自动重置统计
   if (lastResetDate !== today) {
     await resetDailyStats(KV);
   }
   
-  // 获取访问人数
   const uniqueVisitorsKey = `daily_unique_visitors_${today}`;
   const uniqueVisitorsData = await KV.get(uniqueVisitorsKey);
   const uniqueVisitors = uniqueVisitorsData ? JSON.parse(uniqueVisitorsData).length : 0;
   
-  // 获取IP访问日志
   const ipLogsData = await KV.get('ip_access_logs');
   const ipLogs = ipLogsData ? JSON.parse(ipLogsData) : [];
   
-  // 获取Telegram配置状态
   const botToken = await KV.get('telegram_bot_token');
   const chatId = await KV.get('telegram_chat_id');
-  const telegramConfigured = !!(botToken && chatId);
-  
-  // 获取忽略的IP地址
   const ignoredIP = await KV.get('ignored_ip') || '未设置';
   
   return {
@@ -600,7 +467,7 @@ async function getStats(KV) {
     telegram_clicks: parseInt(await KV.get('daily_telegram_clicks') || '0'),
     unique_visitors: uniqueVisitors,
     ip_logs: ipLogs,
-    telegram_configured: telegramConfigured,
+    telegram_configured: !!(botToken && chatId),
     ignored_ip: ignoredIP,
     reset_date: lastResetDate || today
   };
@@ -609,7 +476,6 @@ async function getStats(KV) {
 // 处理统计API
 async function handleStats(request, KV) {
   if (request.method === 'POST') {
-    // 记录事件
     const { type } = await request.json();
     if (['copy_clicks', 'telegram_clicks'].includes(type)) {
       await recordStat(KV, type);
@@ -621,7 +487,6 @@ async function handleStats(request, KV) {
       }
     });
   } else if (request.method === 'GET') {
-    // 获取统计信息
     const stats = await getStats(KV);
     return new Response(JSON.stringify(stats), {
       headers: {
@@ -636,7 +501,6 @@ async function handleStats(request, KV) {
 
 // 处理测试Telegram通知
 async function handleTestTelegram(request, KV) {
-  // 检查登录状态
   const cookieHeader = request.headers.get('Cookie');
   const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
   
@@ -698,18 +562,18 @@ async function getConfigFromKV(KV) {
   };
 }
 
-// 获取北京日期字符串 (YYYY-MM-DD)
+// 获取北京日期字符串
 function getBeijingDateString(date = new Date()) {
-  const beijingOffset = 8 * 60; // 北京时间 UTC+8
+  const beijingOffset = 8 * 60;
   const localOffset = date.getTimezoneOffset();
   const beijingTime = new Date(date.getTime() + (beijingOffset + localOffset) * 60000);
   
   return beijingTime.toISOString().split('T')[0];
 }
 
-// 转换为北京时间函数
+// 转换为北京时间
 function convertToBeijingTime(date) {
-  const beijingOffset = 8 * 60; // 北京时间 UTC+8
+  const beijingOffset = 8 * 60;
   const localDate = new Date(date);
   const localOffset = localDate.getTimezoneOffset();
   const beijingTime = new Date(localDate.getTime() + (beijingOffset + localOffset) * 60000);
@@ -727,32 +591,23 @@ function convertToBeijingTime(date) {
 
 // 处理管理面板
 async function handleAdminPanel(request, KV) {
-  // 检查是否已设置密码
   const adminPassword = await KV.get('admin_password');
   
   if (!adminPassword) {
-    // 显示初始设置页面
     return new Response(getSetupHTML(), {
-      headers: {
-        'Content-Type': 'text/html;charset=UTF-8',
-      },
+      headers: { 'Content-Type': 'text/html;charset=UTF-8' }
     });
   }
   
-  // 检查登录状态
   const cookieHeader = request.headers.get('Cookie');
   const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
   
   if (!isLoggedIn) {
-    // 显示登录页面
     return new Response(getLoginHTML(), {
-      headers: {
-        'Content-Type': 'text/html;charset=UTF-8',
-      },
+      headers: { 'Content-Type': 'text/html;charset=UTF-8' }
     });
   }
   
-  // 显示管理面板
   const config = await getConfigFromKV(KV);
   const lastUpdated = await KV.get('last_updated') || '从未更新';
   const lastAutoCheck = await KV.get('last_auto_check') || '从未检查';
@@ -760,9 +615,7 @@ async function handleAdminPanel(request, KV) {
   const stats = await getStats(KV);
   
   return new Response(getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, stats), {
-    headers: {
-      'Content-Type': 'text/html;charset=UTF-8',
-    },
+    headers: { 'Content-Type': 'text/html;charset=UTF-8' }
   });
 }
 
@@ -782,7 +635,6 @@ async function handleAdminSetup(request, KV) {
       });
     }
     
-    // 存储密码
     await KV.put('admin_password', password);
     
     return new Response(JSON.stringify({ success: true }), {
@@ -846,7 +698,6 @@ async function handleAdminLogout(request, KV) {
 
 // 处理配置更新
 async function handleUpdateConfig(request, KV) {
-  // 检查登录状态
   const cookieHeader = request.headers.get('Cookie');
   const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
   
@@ -869,14 +720,12 @@ async function handleUpdateConfig(request, KV) {
     const telegramChatId = formData.get('telegram_chat_id');
     const ignoredIP = formData.get('ignored_ip');
     
-    // 更新配置到KV
     await KV.put('subscription_url', subscriptionUrl);
     await KV.put('telegram_group', telegramGroup);
     await KV.put('telegram_bot_token', telegramBotToken);
     await KV.put('telegram_chat_id', telegramChatId);
     await KV.put('ignored_ip', ignoredIP);
     
-    // 更新最后修改时间为当前北京时间
     const currentBeijingTime = convertToBeijingTime(new Date());
     await KV.put('last_updated', currentBeijingTime);
     
@@ -894,7 +743,9 @@ async function handleUpdateConfig(request, KV) {
   }
 }
 
-// 初始设置页面HTML (保持不变)
+// ==================== 界面模板 ====================
+
+// 初始设置页面
 function getSetupHTML() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -903,44 +754,171 @@ function getSetupHTML() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>初始设置 - Link Manager</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-color: #10b981;
+            --error-color: #ef4444;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+            --bg-white: #ffffff;
+            --border-color: #e5e7eb;
+            --shadow-lg: 0 20px 60px rgba(0,0,0,0.3);
+            --shadow-md: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
+        
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh; display: flex; justify-content: center; align-items: center;
+            background: var(--primary-gradient);
+            min-height: 100vh; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center;
             padding: 20px;
         }
+        
         .card {
-            background: white; border-radius: 20px; padding: 40px;
-            width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            background: var(--bg-white); 
+            border-radius: 20px; 
+            padding: 3rem;
+            width: 100%; 
+            max-width: 420px; 
+            box-shadow: var(--shadow-lg);
+            backdrop-filter: blur(10px);
         }
-        h1 { text-align: center; margin-bottom: 30px; color: #333; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
-        input { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 16px; }
+        
+        .logo {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        
+        .logo-icon {
+            width: 64px;
+            height: 64px;
+            background: var(--primary-gradient);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1rem;
+            box-shadow: var(--shadow-md);
+        }
+        
+        .logo-icon svg {
+            width: 32px;
+            height: 32px;
+            fill: white;
+        }
+        
+        h1 { 
+            text-align: center; 
+            margin-bottom: 1.5rem; 
+            color: var(--text-primary);
+            font-size: 1.875rem;
+            font-weight: 700;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+            line-height: 1.6;
+        }
+        
+        .form-group { 
+            margin-bottom: 1.5rem; 
+        }
+        
+        label { 
+            display: block; 
+            margin-bottom: 0.5rem; 
+            color: var(--text-primary); 
+            font-weight: 500; 
+        }
+        
+        input { 
+            width: 100%; 
+            padding: 0.875rem; 
+            border: 2px solid var(--border-color); 
+            border-radius: 12px; 
+            font-size: 1rem; 
+            transition: all 0.3s ease;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
         button { 
-            width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600;
-            cursor: pointer; transition: transform 0.2s;
+            width: 100%; 
+            padding: 1rem; 
+            background: var(--primary-gradient);
+            color: white; 
+            border: none; 
+            border-radius: 12px; 
+            font-size: 1rem; 
+            font-weight: 600;
+            cursor: pointer; 
+            transition: all 0.3s ease;
         }
-        button:hover { transform: translateY(-2px); }
-        .message { padding: 10px; border-radius: 8px; margin-bottom: 20px; text-align: center; display: none; }
-        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+        
+        .message { 
+            padding: 1rem; 
+            border-radius: 12px; 
+            margin-bottom: 1.5rem; 
+            text-align: center; 
+            display: none; 
+        }
+        
+        .success { 
+            background: #ecfdf5; 
+            color: var(--success-color); 
+            border: 1px solid #d1fae5; 
+        }
+        
+        .error { 
+            background: #fef2f2; 
+            color: var(--error-color); 
+            border: 1px solid #fecaca; 
+        }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>初始设置</h1>
+        <div class="logo">
+            <div class="logo-icon">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>
+                </svg>
+            </div>
+            <h1>Link Manager</h1>
+            <p class="subtitle">设置您的管理密码以开始使用</p>
+        </div>
+        
         <div id="message" class="message"></div>
+        
         <form id="setupForm">
             <div class="form-group">
-                <label for="password">设置管理密码</label>
-                <input type="password" id="password" name="password" required placeholder="请输入管理密码">
+                <label for="password">管理密码</label>
+                <input type="password" id="password" name="password" required 
+                       placeholder="请输入安全的密码">
             </div>
             <button type="submit">完成设置</button>
         </form>
     </div>
+    
     <script>
         document.getElementById('setupForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -985,7 +963,7 @@ function getSetupHTML() {
 </html>`;
 }
 
-// 登录页面HTML (保持不变)
+// 登录页面
 function getLoginHTML() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -994,43 +972,155 @@ function getLoginHTML() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - Link Manager</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --error-color: #ef4444;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+            --bg-white: #ffffff;
+            --border-color: #e5e7eb;
+            --shadow-lg: 0 20px 60px rgba(0,0,0,0.3);
+            --shadow-md: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
+        
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh; display: flex; justify-content: center; align-items: center;
+            background: var(--primary-gradient);
+            min-height: 100vh; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center;
             padding: 20px;
         }
+        
         .card {
-            background: white; border-radius: 20px; padding: 40px;
-            width: 100%; max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            background: var(--bg-white); 
+            border-radius: 20px; 
+            padding: 3rem;
+            width: 100%; 
+            max-width: 420px; 
+            box-shadow: var(--shadow-lg);
         }
-        h1 { text-align: center; margin-bottom: 30px; color: #333; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
-        input { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 16px; }
+        
+        .logo {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        
+        .logo-icon {
+            width: 64px;
+            height: 64px;
+            background: var(--primary-gradient);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1rem;
+            box-shadow: var(--shadow-md);
+        }
+        
+        .logo-icon svg {
+            width: 32px;
+            height: 32px;
+            fill: white;
+        }
+        
+        h1 { 
+            text-align: center; 
+            margin-bottom: 1.5rem; 
+            color: var(--text-primary);
+            font-size: 1.875rem;
+            font-weight: 700;
+        }
+        
+        .form-group { 
+            margin-bottom: 1.5rem; 
+        }
+        
+        label { 
+            display: block; 
+            margin-bottom: 0.5rem; 
+            color: var(--text-primary); 
+            font-weight: 500; 
+        }
+        
+        input { 
+            width: 100%; 
+            padding: 0.875rem; 
+            border: 2px solid var(--border-color); 
+            border-radius: 12px; 
+            font-size: 1rem; 
+            transition: all 0.3s ease;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
         button { 
-            width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600;
-            cursor: pointer; transition: transform 0.2s;
+            width: 100%; 
+            padding: 1rem; 
+            background: var(--primary-gradient);
+            color: white; 
+            border: none; 
+            border-radius: 12px; 
+            font-size: 1rem; 
+            font-weight: 600;
+            cursor: pointer; 
+            transition: all 0.3s ease;
         }
-        button:hover { transform: translateY(-2px); }
-        .message { padding: 10px; border-radius: 8px; margin-bottom: 20px; text-align: center; display: none; }
-        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+        
+        .message { 
+            padding: 1rem; 
+            border-radius: 12px; 
+            margin-bottom: 1.5rem; 
+            text-align: center; 
+            display: none; 
+        }
+        
+        .error { 
+            background: #fef2f2; 
+            color: var(--error-color); 
+            border: 1px solid #fecaca; 
+        }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>管理员登录</h1>
+        <div class="logo">
+            <div class="logo-icon">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>
+                </svg>
+            </div>
+            <h1>管理员登录</h1>
+        </div>
+        
         <div id="message" class="message"></div>
+        
         <form id="loginForm">
             <div class="form-group">
                 <label for="password">管理密码</label>
-                <input type="password" id="password" name="password" required placeholder="请输入管理密码">
+                <input type="password" id="password" name="password" required 
+                       placeholder="请输入管理密码">
             </div>
             <button type="submit">登录</button>
         </form>
     </div>
+    
     <script>
         document.getElementById('loginForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -1072,36 +1162,31 @@ function getLoginHTML() {
 </html>`;
 }
 
-// 管理面板HTML (增强版，添加忽略IP配置)
+// 管理面板HTML
 function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, stats) {
-  const statusText = {
-    'active': '正常',
-    'inactive': '异常',
-    'error': '检查失败',
-    'unknown': '未知'
-  }[autoCheckStatus] || '未知';
+  const statusConfig = {
+    'active': { text: '正常', color: '#10b981' },
+    'inactive': { text: '异常', color: '#ef4444' },
+    'error': { text: '检查失败', color: '#f59e0b' },
+    'unknown': { text: '未知', color: '#6b7280' }
+  };
   
-  const statusColor = {
-    'active': '#10b981',
-    'inactive': '#ef4444',
-    'error': '#f59e0b',
-    'unknown': '#6b7280'
-  }[autoCheckStatus] || '#6b7280';
-
-  // Telegram配置状态
+  const status = statusConfig[autoCheckStatus] || statusConfig.unknown;
   const telegramStatus = stats.telegram_configured ? 
     '<span style="color: #10b981;">✓ 已配置</span>' : 
     '<span style="color: #ef4444;">✗ 未配置</span>';
-
-  // 忽略IP状态
+  
   const ignoredIPStatus = stats.ignored_ip && stats.ignored_ip !== '未设置' ? 
     `<span style="color: #10b981;">✓ 已设置: ${stats.ignored_ip}</span>` : 
     '<span style="color: #ef4444;">✗ 未设置</span>';
 
-  // 构建IP日志HTML
   const ipLogsHTML = stats.ip_logs && stats.ip_logs.length > 0 
-    ? stats.ip_logs.map(log => `<div style="padding: 8px 0; border-bottom: 1px solid #eee; font-family: monospace; font-size: 12px; white-space: pre-line; line-height: 1.4;">${log}</div>`).join('')
-    : '<div style="padding: 10px; text-align: center; color: #999;">暂无访问日志</div>';
+    ? stats.ip_logs.map(log => `
+        <div class="log-entry">
+          <div class="log-content">${log}</div>
+        </div>
+      `).join('')
+    : '<div class="empty-state">暂无访问日志</div>';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1110,92 +1195,316 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>管理面板 - Link Manager</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --error-color: #ef4444;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+            --bg-white: #ffffff;
+            --bg-gray: #f8fafc;
+            --border-color: #e5e7eb;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.1);
+            --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+            --shadow-lg: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
+        
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5; min-height: 100vh; padding: 20px;
+            background: var(--bg-gray); 
+            min-height: 100vh; 
+            padding: 20px;
+            color: var(--text-primary);
         }
-        .container { max-width: 1200px; margin: 0 auto; }
+        
+        .container { 
+            max-width: 1400px; 
+            margin: 0 auto; 
+        }
+        
         .header { 
-            background: white; padding: 30px; border-radius: 15px; 
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1); margin-bottom: 20px;
-            text-align: center; display: flex; justify-content: space-between; align-items: center;
+            background: var(--bg-white); 
+            padding: 2rem; 
+            border-radius: 20px; 
+            box-shadow: var(--shadow-lg); 
+            margin-bottom: 2rem;
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
         }
+        
+        .header-content h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: var(--primary-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .header-content p {
+            color: var(--text-secondary);
+        }
+        
         .card {
-            background: white; padding: 30px; border-radius: 15px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1); margin-bottom: 20px;
+            background: var(--bg-white); 
+            padding: 2rem; 
+            border-radius: 20px;
+            box-shadow: var(--shadow-lg); 
+            margin-bottom: 2rem;
         }
-        h1 { color: #333; margin-bottom: 10px; }
-        h2 { color: #333; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #f0f0f0; }
-        h3 { color: #555; margin-bottom: 15px; }
-        .subtitle { color: #666; margin-bottom: 20px; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
-        input { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 16px; }
+        
+        h2 { 
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem; 
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        h2::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: var(--primary-gradient);
+            border-radius: 2px;
+        }
+        
+        h3 { 
+            color: var(--text-primary); 
+            margin-bottom: 1rem; 
+            font-size: 1.125rem;
+        }
+        
+        .form-group { 
+            margin-bottom: 1.5rem; 
+        }
+        
+        label { 
+            display: block; 
+            margin-bottom: 0.5rem; 
+            color: var(--text-primary); 
+            font-weight: 500; 
+        }
+        
+        input { 
+            width: 100%; 
+            padding: 0.875rem; 
+            border: 2px solid var(--border-color); 
+            border-radius: 12px; 
+            font-size: 1rem; 
+            transition: all 0.3s ease;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
         button { 
-            padding: 14px 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600;
-            cursor: pointer; transition: transform 0.2s; margin-right: 10px; margin-bottom: 10px;
+            padding: 0.875rem 1.5rem; 
+            background: var(--primary-gradient);
+            color: white; 
+            border: none; 
+            border-radius: 12px; 
+            font-size: 0.875rem; 
+            font-weight: 600;
+            cursor: pointer; 
+            transition: all 0.3s ease;
+            margin-right: 0.5rem;
+            margin-bottom: 0.5rem;
         }
-        button:hover { transform: translateY(-2px); }
+        
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+        
         .button-secondary {
-            background: #6c757d;
+            background: #6b7280;
         }
+        
         .button-success {
-            background: #10b981;
+            background: var(--success-color);
         }
+        
         .button-warning {
-            background: #f59e0b;
+            background: var(--warning-color);
         }
-        .message { padding: 15px; border-radius: 8px; margin-bottom: 20px; display: none; }
-        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        
+        .message { 
+            padding: 1rem; 
+            border-radius: 12px; 
+            margin-bottom: 1.5rem; 
+            display: none; 
+        }
+        
+        .success { 
+            background: #ecfdf5; 
+            color: var(--success-color); 
+            border: 1px solid #d1fae5; 
+        }
+        
+        .error { 
+            background: #fef2f2; 
+            color: var(--error-color); 
+            border: 1px solid #fecaca; 
+        }
+        
         .info-box { 
-            background: #e3f2fd; padding: 15px; border-radius: 8px; 
-            border-left: 4px solid #2196f3; margin-bottom: 20px;
+            background: #eff6ff; 
+            padding: 1.5rem; 
+            border-radius: 12px; 
+            border-left: 4px solid #3b82f6; 
+            margin-bottom: 1.5rem;
+            line-height: 1.6;
         }
+        
         .stats-grid { 
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-            gap: 15px; margin-bottom: 20px;
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+            gap: 1rem; 
+            margin-bottom: 1.5rem;
         }
+        
         .stat-card {
-            background: white; padding: 20px; border-radius: 10px;
-            border-left: 4px solid #667eea; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            background: var(--bg-white); 
+            padding: 1.5rem; 
+            border-radius: 12px;
+            border-left: 4px solid #667eea; 
+            box-shadow: var(--shadow-sm);
             text-align: center;
+            transition: transform 0.3s ease;
         }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+        
         .stat-number { 
-            font-size: 2rem; font-weight: bold; color: #333; 
-            margin-bottom: 5px;
+            font-size: 2rem; 
+            font-weight: 700; 
+            color: var(--text-primary); 
+            margin-bottom: 0.5rem;
         }
+        
         .stat-label { 
-            color: #666; font-size: 0.9rem;
+            color: var(--text-secondary); 
+            font-size: 0.875rem;
+            font-weight: 500;
         }
+        
         .status-badge {
-            display: inline-block; padding: 5px 12px; border-radius: 20px;
-            color: white; font-size: 0.8rem; font-weight: 500;
+            display: inline-block; 
+            padding: 0.5rem 1rem; 
+            border-radius: 20px;
+            color: white; 
+            font-size: 0.75rem; 
+            font-weight: 600;
         }
+        
         .logs-container {
-            max-height: 400px; overflow-y: auto; border: 1px solid #e2e8f0;
-            border-radius: 8px; padding: 15px; background: #fafafa;
-            margin-top: 15px;
+            max-height: 500px; 
+            overflow-y: auto; 
+            border: 1px solid var(--border-color);
+            border-radius: 12px; 
+            padding: 1rem; 
+            background: var(--bg-gray);
         }
+        
+        .log-entry {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            transition: background-color 0.2s ease;
+        }
+        
+        .log-entry:hover {
+            background-color: var(--bg-white);
+        }
+        
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+        
+        .log-content {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            white-space: pre-line;
+            color: var(--text-primary);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-secondary);
+        }
+        
         .two-column {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 2rem;
         }
+        
         .help-text {
-            color: #6b7280; font-size: 0.875rem; margin-top: 5px;
+            color: var(--text-secondary); 
+            font-size: 0.75rem; 
+            margin-top: 0.25rem;
+            line-height: 1.4;
         }
+        
+        .section-divider {
+            height: 1px;
+            background: var(--border-color);
+            margin: 2rem 0;
+        }
+        
+        @media (max-width: 1024px) {
+            .two-column { 
+                grid-template-columns: 1fr; 
+            }
+        }
+        
         @media (max-width: 768px) {
-            .two-column { grid-template-columns: 1fr; }
+            .header {
+                flex-direction: column;
+                gap: 1rem;
+                text-align: center;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .card {
+                padding: 1.5rem;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <div>
+            <div class="header-content">
                 <h1>Link Manager</h1>
-                <p class="subtitle">配置您的订阅服务</p>
+                <p>配置您的订阅服务和管理统计信息</p>
             </div>
             <div>
                 <button onclick="logout()" class="button-secondary">退出登录</button>
@@ -1229,7 +1538,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                     <div class="info-box">
                         <strong>统计重置日期:</strong> ${stats.reset_date} (每日北京时间 00:00 自动重置)<br>
                         <strong>忽略IP设置:</strong> ${ignoredIPStatus}<br>
-                        <strong>注意:</strong> 页面访问统计主页访问，访问人数基于IP，忽略IP的访问不会被记录
+                        <strong>注意:</strong> 忽略IP的访问不会被记录在统计和日志中
                     </div>
                 </div>
                 
@@ -1242,25 +1551,27 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                         <strong>最后配置更新时间:</strong> ${lastUpdated}<br>
                         <strong>最后自动检查时间:</strong> ${lastAutoCheck}<br>
                         <strong>自动检查状态:</strong> 
-                        <span class="status-badge" style="background: ${statusColor}">${statusText}</span><br>
+                        <span class="status-badge" style="background: ${status.color}">${status.text}</span><br>
                         <strong>Telegram通知:</strong> ${telegramStatus}
                     </div>
                     
                     <form id="configForm">
                         <h3>基本配置</h3>
                         <div class="form-group">
-                            <label for="subscription_url">订阅链接 (SUBSCRIPTION_URL)</label>
+                            <label for="subscription_url">订阅链接</label>
                             <input type="url" id="subscription_url" name="subscription_url" 
                                    value="${config.SUBSCRIPTION_URL}" required 
                                    placeholder="https://snippets.vlato.site">
                         </div>
                         
                         <div class="form-group">
-                            <label for="telegram_group">Telegram群组链接 (TELEGRAM_GROUP)</label>
+                            <label for="telegram_group">Telegram群组链接</label>
                             <input type="url" id="telegram_group" name="telegram_group" 
                                    value="${config.TELEGRAM_GROUP}" required 
                                    placeholder="https://t.me/your_group">
                         </div>
+                        
+                        <div class="section-divider"></div>
                         
                         <h3>Telegram通知配置</h3>
                         <div class="form-group">
@@ -1283,7 +1594,9 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                             </div>
                         </div>
                         
-                        <h3>忽略IP配置</h3>
+                        <div class="section-divider"></div>
+                        
+                        <h3>高级配置</h3>
                         <div class="form-group">
                             <label for="ignored_ip">忽略的IP地址</label>
                             <input type="text" id="ignored_ip" name="ignored_ip" 
@@ -1294,9 +1607,11 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                             </div>
                         </div>
                         
-                        <button type="submit">更新配置</button>
-                        <button type="button" onclick="testTelegram()" class="button-success">测试通知</button>
-                        <button type="button" onclick="window.location.href='/'">返回主页</button>
+                        <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                            <button type="submit">更新配置</button>
+                            <button type="button" onclick="testTelegram()" class="button-success">测试通知</button>
+                            <button type="button" onclick="window.location.href='/'" class="button-secondary">返回主页</button>
+                        </div>
                     </form>
                 </div>
             </div>
@@ -1304,11 +1619,11 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             <!-- 右侧：访问日志 -->
             <div>
                 <div class="card">
-                    <h2>访问IP日志 (最近100条)</h2>
+                    <h2>访问IP日志</h2>
                     <div class="info-box">
-                        <strong>地理位置信息:</strong> 现在IP日志会记录访问者的国家和城市信息<br>
+                        <strong>地理位置信息:</strong> 记录访问者的国家、城市和网络信息<br>
                         <strong>忽略IP:</strong> ${stats.ignored_ip} 的访问不会被记录<br>
-                        <strong>IPv6支持:</strong> 已修复IPv6地址忽略功能
+                        <strong>IPv6支持:</strong> 已完全支持IPv6地址识别和忽略
                     </div>
                     <div class="logs-container">
                         ${ipLogsHTML}
@@ -1341,7 +1656,6 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                     message.textContent = result.message + ' 最后更新: ' + result.lastUpdated;
                     message.className = 'message success';
                     message.style.display = 'block';
-                    // 刷新页面以更新统计信息
                     setTimeout(() => location.reload(), 2000);
                 } else {
                     message.textContent = '错误：' + result.error;
@@ -1403,7 +1717,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
 </html>`;
 }
 
-// 主页面HTML (保持不变)
+// 主页面HTML
 function getHTML(subscriptionUrl, telegramGroup) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1412,6 +1726,19 @@ function getHTML(subscriptionUrl, telegramGroup) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hello Snippets!</title>
     <style>
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --error-color: #ef4444;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+            --bg-white: #ffffff;
+            --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.3);
+            --shadow-md: 0 10px 25px rgba(0, 0, 0, 0.1);
+            --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -1419,8 +1746,8 @@ function getHTML(subscriptionUrl, telegramGroup) {
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--primary-gradient);
             min-height: 100vh;
             display: flex;
             justify-content: center;
@@ -1429,67 +1756,88 @@ function getHTML(subscriptionUrl, telegramGroup) {
         }
 
         .card {
-            background: #f5f5f5;
-            border-radius: 20px;
-            padding: 50px 40px;
+            background: var(--bg-white);
+            border-radius: 24px;
+            padding: 3rem 2.5rem;
             width: 100%;
-            max-width: 420px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 480px;
+            box-shadow: var(--shadow-lg);
             text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: var(--primary-gradient);
         }
 
         .icon {
-            width: 70px;
-            height: 70px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 16px;
+            width: 80px;
+            height: 80px;
+            background: var(--primary-gradient);
+            border-radius: 20px;
             display: flex;
             justify-content: center;
             align-items: center;
-            margin: 0 auto 30px;
-            box-shadow: 0 8px 16px rgba(102, 126, 234, 0.4);
+            margin: 0 auto 2rem;
+            box-shadow: var(--shadow-md);
+            transition: transform 0.3s ease;
+        }
+
+        .icon:hover {
+            transform: scale(1.05) rotate(5deg);
         }
 
         .icon svg {
-            width: 36px;
-            height: 36px;
+            width: 40px;
+            height: 40px;
             fill: white;
         }
 
         h1 {
-            font-size: 32px;
-            font-weight: 700;
-            color: #2d3748;
-            margin-bottom: 30px;
+            font-size: 2.5rem;
+            font-weight: 800;
+            color: var(--text-primary);
+            margin-bottom: 1.5rem;
+            background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
 
         .status {
             color: white;
-            padding: 10px 24px;
-            border-radius: 25px;
+            padding: 0.75rem 1.5rem;
+            border-radius: 50px;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            margin-bottom: 12px;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
             transition: all 0.3s ease;
+            box-shadow: var(--shadow-sm);
         }
 
         .status.active {
-            background: #10b981;
+            background: var(--success-color);
         }
 
         .status.inactive {
-            background: #ef4444;
+            background: var(--error-color);
         }
 
         .status.checking {
-            background: #f59e0b;
+            background: var(--warning-color);
         }
 
         .status::before {
-            font-size: 16px;
+            font-size: 1rem;
             font-weight: bold;
         }
 
@@ -1507,13 +1855,14 @@ function getHTML(subscriptionUrl, telegramGroup) {
         }
 
         .update-time {
-            color: #718096;
-            font-size: 12px;
-            margin-bottom: 30px;
-            background: rgba(255, 255, 255, 0.7);
-            padding: 6px 12px;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            margin-bottom: 2rem;
+            background: #f8fafc;
+            padding: 0.75rem 1rem;
             border-radius: 12px;
             display: inline-block;
+            border: 1px solid #e2e8f0;
         }
 
         @keyframes rotate {
@@ -1522,39 +1871,44 @@ function getHTML(subscriptionUrl, telegramGroup) {
         }
 
         .description {
-            color: #718096;
-            font-size: 14px;
-            margin-bottom: 15px;
+            color: var(--text-secondary);
+            font-size: 1rem;
+            margin-bottom: 2rem;
             line-height: 1.6;
         }
 
         .button {
             width: 100%;
-            padding: 16px 24px;
+            padding: 1.125rem 1.5rem;
             border: none;
-            border-radius: 12px;
-            font-size: 15px;
+            border-radius: 16px;
+            font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s ease;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 10px;
-            margin-bottom: 12px;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
             text-decoration: none;
             color: white;
             position: relative;
             overflow: hidden;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .button::before {
+            font-size: 1.25rem;
         }
 
         .button-purple {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--primary-gradient);
         }
 
         .button-purple:hover {
             transform: translateY(-2px);
-            box-shadow: 0 8px 16px rgba(102, 126, 234, 0.4);
+            box-shadow: var(--shadow-md);
         }
 
         .button-cyan {
@@ -1563,24 +1917,12 @@ function getHTML(subscriptionUrl, telegramGroup) {
 
         .button-cyan:hover {
             transform: translateY(-2px);
-            box-shadow: 0 8px 16px rgba(8, 145, 178, 0.4);
+            box-shadow: 0 8px 25px rgba(8, 145, 178, 0.3);
         }
 
         .button-copied {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
+            background: linear-gradient(135deg, var(--success-color) 0%, #059669 100%) !important;
             transform: scale(0.98);
-        }
-
-        .button::before {
-            font-size: 18px;
-        }
-
-        .button-purple::before {
-            content: "📄";
-        }
-
-        .button-cyan::before {
-            content: "✈";
         }
 
         .copy-feedback {
@@ -1589,12 +1931,13 @@ function getHTML(subscriptionUrl, telegramGroup) {
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(16, 185, 129, 0.9);
+            background: rgba(16, 185, 129, 0.95);
             display: flex;
             align-items: center;
             justify-content: center;
             opacity: 0;
             transition: opacity 0.3s ease;
+            border-radius: 16px;
         }
 
         .copy-feedback.show {
@@ -1603,20 +1946,39 @@ function getHTML(subscriptionUrl, telegramGroup) {
         
         .admin-link {
             display: inline-block;
-            margin-top: 15px;
+            margin-top: 1.5rem;
             color: #667eea;
             text-decoration: none;
-            font-size: 13px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: color 0.3s ease;
         }
         
         .admin-link:hover {
+            color: #5a67d8;
             text-decoration: underline;
+        }
+
+        .footer {
+            margin-top: 2rem;
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
         }
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="icon">
+        <div class="icon pulse">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>
             </svg>
@@ -1624,10 +1986,10 @@ function getHTML(subscriptionUrl, telegramGroup) {
         
         <h1>Hello Snippets!</h1>
         
-        <div id="statusBadge" class="status checking">正在检测...</div>
+        <div id="statusBadge" class="status checking">正在检测服务状态...</div>
         
         <p class="description">
-            您的代理服务正在正常运行,享受安全、快速的网络连接体验
+            您的代理服务正在正常运行，享受安全、快速的网络连接体验
         </p>
         
         <div id="updateTime" class="update-time">检测更新时间...</div>
@@ -1635,18 +1997,18 @@ function getHTML(subscriptionUrl, telegramGroup) {
         <button id="copyButton" class="button button-purple">
             <span>订阅链接（点击复制）</span>
             <div id="copyFeedback" class="copy-feedback">
-                <span>已复制！</span>
+                <span>✅ 已复制到剪贴板！</span>
             </div>
         </button>
         
         <a href="${telegramGroup}" target="_blank" id="tgButton" class="button button-cyan">
-            加入TG交流群组
+            <span>加入 Telegram 交流群组</span>
         </a>
         
         <a href="/admin" class="admin-link">管理面板</a>
         
         <div class="footer">
-            Powered by Cloudflare
+            Powered by Cloudflare Workers
         </div>
     </div>
 
@@ -1661,13 +2023,10 @@ function getHTML(subscriptionUrl, telegramGroup) {
             try {
                 await fetch('/api/stats', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ type: type })
                 });
             } catch (error) {
-                // 静默失败，不影响用户体验
                 console.log('统计上报失败:', error);
             }
         }
@@ -1682,7 +2041,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
                 
                 if (data.active) {
                     statusBadge.className = 'status active';
-                    statusBadge.textContent = '代理功能已启用';
+                    statusBadge.textContent = '🎉 代理功能已启用';
                     
                     if (data.lastModified) {
                         updateTime.textContent = '最后更新: ' + data.lastModified;
@@ -1691,53 +2050,49 @@ function getHTML(subscriptionUrl, telegramGroup) {
                     }
                 } else {
                     statusBadge.className = 'status inactive';
-                    statusBadge.textContent = '代理功能已失效';
+                    statusBadge.textContent = '❌ 代理功能已失效';
                     updateTime.textContent = '更新检测失败';
                 }
             } catch (error) {
-                console.error('检测失败:', error);
                 statusBadge.className = 'status inactive';
-                statusBadge.textContent = '代理功能已失效';
-                updateTime.textContent = '更新检测失败';
+                statusBadge.textContent = '❌ 代理功能检测失败';
+                updateTime.textContent = '网络连接异常';
             }
         }
 
         function copyToClipboard() {
             navigator.clipboard.writeText(subscriptionUrl).then(function() {
-                // 显示复制成功效果
                 copyButton.classList.add('button-copied');
                 copyFeedback.classList.add('show');
                 
-                // 记录复制统计
                 recordStat('copy_clicks');
                 
-                // 3秒后恢复原状
                 setTimeout(function() {
                     copyButton.classList.remove('button-copied');
                     copyFeedback.classList.remove('show');
-                }, 3000);
+                }, 2000);
             }).catch(function(err) {
                 console.error('复制失败:', err);
-                // 复制失败也显示效果，但用红色
                 copyButton.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
                 copyButton.querySelector('span').textContent = '复制失败';
                 
                 setTimeout(function() {
                     copyButton.style.background = '';
                     copyButton.querySelector('span').textContent = '订阅链接（点击复制）';
-                }, 3000);
+                }, 2000);
             });
         }
 
-        // 绑定复制按钮点击事件
         copyButton.addEventListener('click', copyToClipboard);
-
-        // 绑定TG按钮点击事件
         tgButton.addEventListener('click', function() {
             recordStat('telegram_clicks');
         });
 
+        // 页面加载时检查状态
         window.addEventListener('DOMContentLoaded', checkLinkStatus);
+        
+        // 每30秒自动检查状态
+        setInterval(checkLinkStatus, 30000);
     </script>
 </body>
 </html>`;
