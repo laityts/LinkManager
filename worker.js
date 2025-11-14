@@ -1717,7 +1717,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
 </html>`;
 }
 
-// 主页面HTML
+// 主页面HTML - 优化移动端间距版本
 function getHTML(subscriptionUrl, telegramGroup) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1753,14 +1753,15 @@ function getHTML(subscriptionUrl, telegramGroup) {
             justify-content: center;
             align-items: center;
             padding: 20px;
+            line-height: 1.6;
         }
 
         .card {
             background: var(--bg-white);
             border-radius: 24px;
-            padding: 3rem 2.5rem;
+            padding: 2.5rem 2rem;
             width: 100%;
-            max-width: 480px;
+            max-width: 440px;
             box-shadow: var(--shadow-lg);
             text-align: center;
             position: relative;
@@ -1773,13 +1774,13 @@ function getHTML(subscriptionUrl, telegramGroup) {
             top: 0;
             left: 0;
             right: 0;
-            height: 4px;
+            height: 5px;
             background: var(--primary-gradient);
         }
 
         .icon {
-            width: 80px;
-            height: 80px;
+            width: 72px;
+            height: 72px;
             background: var(--primary-gradient);
             border-radius: 20px;
             display: flex;
@@ -1795,33 +1796,36 @@ function getHTML(subscriptionUrl, telegramGroup) {
         }
 
         .icon svg {
-            width: 40px;
-            height: 40px;
+            width: 36px;
+            height: 36px;
             fill: white;
         }
 
         h1 {
-            font-size: 2.5rem;
+            font-size: 2.25rem;
             font-weight: 800;
-            color: var(--text-primary);
-            margin-bottom: 1.5rem;
-            background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+            background: var(--primary-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+            letter-spacing: -0.5px;
+            line-height: 1.2;
         }
 
         .status {
             color: white;
-            padding: 0.75rem 1.5rem;
+            padding: 0.75rem 1.25rem;
             border-radius: 50px;
             display: inline-flex;
             align-items: center;
             gap: 0.5rem;
-            font-size: 0.875rem;
+            font-size: 0.9rem;
             font-weight: 600;
-            margin-bottom: 1rem;
+            margin-bottom: 1.25rem;
             transition: all 0.3s ease;
             box-shadow: var(--shadow-sm);
+            min-height: 44px;
         }
 
         .status.active {
@@ -1856,13 +1860,14 @@ function getHTML(subscriptionUrl, telegramGroup) {
 
         .update-time {
             color: var(--text-secondary);
-            font-size: 0.875rem;
+            font-size: 0.85rem;
             margin-bottom: 2rem;
             background: #f8fafc;
             padding: 0.75rem 1rem;
             border-radius: 12px;
             display: inline-block;
             border: 1px solid #e2e8f0;
+            line-height: 1.4;
         }
 
         @keyframes rotate {
@@ -1875,6 +1880,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
             font-size: 1rem;
             margin-bottom: 2rem;
             line-height: 1.6;
+            padding: 0 0.5rem;
         }
 
         .button {
@@ -1896,10 +1902,11 @@ function getHTML(subscriptionUrl, telegramGroup) {
             position: relative;
             overflow: hidden;
             box-shadow: var(--shadow-sm);
+            min-height: 56px;
         }
 
         .button::before {
-            font-size: 1.25rem;
+            font-size: 1.125rem;
         }
 
         .button-purple {
@@ -1950,6 +1957,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
             opacity: 0;
             transition: opacity 0.3s ease;
             border-radius: 16px;
+            font-weight: 600;
         }
 
         .copy-feedback.show {
@@ -1958,23 +1966,34 @@ function getHTML(subscriptionUrl, telegramGroup) {
         
         .admin-link {
             display: inline-block;
-            margin-top: 1.5rem;
+            margin: 1.5rem 0 0.5rem;
             color: #667eea;
             text-decoration: none;
-            font-size: 0.875rem;
+            font-size: 0.9rem;
             font-weight: 500;
             transition: color 0.3s ease;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            background: #f8fafc;
         }
-        
+
+        .admin-link::before {
+            content: "⚙️";
+            margin-right: 6px;
+        }
+                
         .admin-link:hover {
             color: #5a67d8;
-            text-decoration: underline;
+            background: #f1f5f9;
+            text-decoration: none;
         }
 
         .footer {
             margin-top: 2rem;
             color: var(--text-secondary);
-            font-size: 0.75rem;
+            font-size: 0.8rem;
+            padding-top: 1rem;
+            border-top: 1px solid #f1f5f9;
         }
 
         .pulse {
@@ -1985,6 +2004,168 @@ function getHTML(subscriptionUrl, telegramGroup) {
             0% { transform: scale(1); }
             50% { transform: scale(1.05); }
             100% { transform: scale(1); }
+        }
+
+        /* 平板端优化 */
+        @media (max-width: 768px) {
+            body {
+                padding: 16px;
+            }
+            
+            .card {
+                padding: 2rem 1.5rem;
+                border-radius: 20px;
+            }
+            
+            .icon {
+                width: 64px;
+                height: 64px;
+                margin-bottom: 1.75rem;
+            }
+            
+            .icon svg {
+                width: 32px;
+                height: 32px;
+            }
+            
+            h1 {
+                font-size: 2rem;
+                margin-bottom: 0.875rem;
+            }
+            
+            .status {
+                padding: 0.625rem 1.125rem;
+                font-size: 0.85rem;
+                margin-bottom: 1.125rem;
+                min-height: 40px;
+            }
+            
+            .description {
+                font-size: 0.95rem;
+                margin-bottom: 1.75rem;
+            }
+            
+            .button {
+                padding: 1rem 1.25rem;
+                font-size: 0.95rem;
+                margin-bottom: 0.875rem;
+                min-height: 52px;
+            }
+        }
+
+        /* 移动端优化 */
+        @media (max-width: 480px) {
+            body {
+                padding: 12px;
+                align-items: flex-start;
+                min-height: 100vh;
+                padding-top: 20px;
+            }
+            
+            .card {
+                padding: 1.75rem 1.25rem;
+                border-radius: 20px;
+                margin: 0;
+            }
+            
+            .icon {
+                width: 60px;
+                height: 60px;
+                margin-bottom: 1.5rem;
+                border-radius: 16px;
+            }
+            
+            .icon svg {
+                width: 28px;
+                height: 28px;
+            }
+            
+            h1 {
+                font-size: 1.75rem;
+                margin-bottom: 0.75rem;
+            }
+            
+            .status {
+                padding: 0.75rem 1rem;
+                font-size: 0.8rem;
+                margin-bottom: 1rem;
+                min-height: 44px;
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .update-time {
+                font-size: 0.8rem;
+                margin-bottom: 1.5rem;
+                padding: 0.625rem 0.875rem;
+                width: 100%;
+            }
+            
+            .description {
+                font-size: 0.9rem;
+                margin-bottom: 1.5rem;
+                line-height: 1.5;
+                padding: 0;
+            }
+            
+            .button {
+                padding: 1rem;
+                font-size: 0.9rem;
+                margin-bottom: 0.75rem;
+                min-height: 50px;
+                border-radius: 14px;
+            }
+            
+            .button::before {
+                font-size: 16px;
+            }
+            
+            .admin-link {
+                margin: 1.25rem 0 0.5rem;
+                font-size: 0.85rem;
+                padding: 0.5rem 0.875rem;
+            }
+            
+            .footer {
+                margin-top: 1.5rem;
+                font-size: 0.75rem;
+            }
+        }
+
+        /* 小屏手机优化 */
+        @media (max-width: 360px) {
+            .card {
+                padding: 1.5rem 1rem;
+                border-radius: 18px;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            .icon {
+                width: 56px;
+                height: 56px;
+                margin-bottom: 1.25rem;
+            }
+            
+            .status {
+                padding: 0.625rem 0.875rem;
+                font-size: 0.75rem;
+            }
+            
+            .button {
+                padding: 0.875rem;
+                font-size: 0.85rem;
+            }
+        }
+
+        /* 超大屏幕优化 */
+        @media (min-width: 1200px) {
+            .card {
+                max-width: 480px;
+                padding: 3rem 2.5rem;
+            }
         }
     </style>
 </head>
