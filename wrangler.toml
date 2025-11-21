@@ -1,0 +1,10 @@
+# wrangler.toml
+name = 'linkmanager'
+main = "worker.js"
+compatibility_date = "2025-11-21"
+keep_vars = true
+
+# 绑定 KV 命名空间
+[[kv_namespaces]]
+binding = "LINK_MANAGER_KV"  # 在代码中使用的变量名
+id = "453bb673aff84056aa1f486981a30c7f"  # KV 命名空间的 ID
