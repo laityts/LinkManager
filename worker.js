@@ -15,11 +15,15 @@ export default {
       '/admin/api/login': () => handleAdminLogin(request, KV),
       '/admin/api/update-config': () => handleUpdateConfig(request, KV),
       '/admin/api/logout': () => handleAdminLogout(request, KV),
+      '/admin/api/add-link': () => handleAddLink(request, KV),
+      '/admin/api/delete-link': () => handleDeleteLink(request, KV),
+      '/admin/api/update-link': () => handleUpdateLink(request, KV),
+      '/admin/api/reorder-links': () => handleReorderLinks(request, KV),
       '/api/stats': () => handleStats(request, KV),
       '/admin/api/test-telegram': () => handleTestTelegram(request, KV),
-      '/api/check-link': async () => {
+      '/api/check-links': async () => {
         const CONFIG = await getConfigFromKV(KV);
-        return handleCheckLink(CONFIG, KV);
+        return handleCheckLinks(CONFIG, KV);
       }
     };
 
@@ -36,7 +40,7 @@ export default {
 
     // 返回主页
     const CONFIG = await getConfigFromKV(KV);
-    return new Response(getHTML(CONFIG.SUBSCRIPTION_URL, CONFIG.TELEGRAM_GROUP), {
+    return new Response(getHTML(CONFIG.LINKS, CONFIG.TELEGRAM_GROUP, CONFIG.TELEGRAM_BUTTON_TEXT, CONFIG.TELEGRAM_BUTTON_HIDDEN), {
       headers: { 'Content-Type': 'text/html;charset=UTF-8' }
     });
   },
@@ -289,92 +293,141 @@ async function recordUniqueVisitor(KV, clientIP, today) {
 async function checkAndUpdateLinkStatus(KV) {
   try {
     const config = await getConfigFromKV(KV);
-    if (!config.SUBSCRIPTION_URL || config.SUBSCRIPTION_URL === 'https://xx') {
-      return '❌ 订阅链接未配置，跳过自动检查';
+    const links = config.LINKS || [];
+    
+    if (links.length === 0) {
+      return '❌ 没有配置订阅链接，跳过自动检查';
     }
     
-    const response = await fetch(config.SUBSCRIPTION_URL, {
-      method: 'HEAD',
-      signal: AbortSignal.timeout(5000)
-    });
+    let results = [];
+    let hasStatusChange = false;
     
-    const isActive = response.ok || (response.status >= 200 && response.status < 400);
-    const previousStatus = await KV.get('auto_check_status');
+    for (const link of links) {
+      if (!link.url || link.url === 'https://xx') {
+        results.push(`❌ "${link.name}"：未配置链接`);
+        continue;
+      }
+      
+      try {
+        const response = await fetch(link.url, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(5000)
+        });
+        
+        const isActive = response.ok || (response.status >= 200 && response.status < 400);
+        const previousStatus = link.status || 'unknown';
+        
+        // 更新链接状态
+        link.status = isActive ? 'active' : 'inactive';
+        link.lastChecked = convertToBeijingTime(new Date());
+        
+        results.push(`✅ "${link.name}"：${isActive ? '正常' : '异常'}`);
+        
+        // 状态变化通知
+        if (previousStatus === 'active' && !isActive) {
+          const message = `🔴 <b>订阅链接异常</b>\n\n` +
+                         `链接名称: ${link.name}\n` +
+                         `链接地址: ${link.url}\n` +
+                         `状态: 连接失败\n` +
+                         `时间: ${convertToBeijingTime(new Date())}\n` +
+                         `请及时检查服务状态。`;
+          
+          await sendTelegramMessage(KV, message);
+          results[results.length - 1] += ' 🔴 (已发送异常通知)';
+          hasStatusChange = true;
+        }
+        
+        if (previousStatus === 'inactive' && isActive) {
+          const message = `🟢 <b>订阅链接已恢复</b>\n\n` +
+                         `链接名称: ${link.name}\n` +
+                         `链接地址: ${link.url}\n` +
+                         `状态: 连接正常\n` +
+                         `时间: ${convertToBeijingTime(new Date())}\n` +
+                         `服务已恢复正常。`;
+          
+          await sendTelegramMessage(KV, message);
+          results[results.length - 1] += ' 🟢 (已发送恢复通知)';
+          hasStatusChange = true;
+        }
+        
+      } catch (error) {
+        const previousStatus = link.status || 'unknown';
+        link.status = 'error';
+        link.lastChecked = convertToBeijingTime(new Date());
+        
+        results.push(`❌ "${link.name}"：检查失败 (${error.message})`);
+        
+        if (previousStatus === 'active') {
+          const message = `🔴 <b>订阅链接检查失败</b>\n\n` +
+                         `链接名称: ${link.name}\n` +
+                         `链接地址: ${link.url}\n` +
+                         `错误: ${error.message}\n` +
+                         `时间: ${convertToBeijingTime(new Date())}\n` +
+                         `请检查网络连接或服务状态。`;
+          
+          await sendTelegramMessage(KV, message);
+          results[results.length - 1] += ' 🔴 (已发送失败通知)';
+          hasStatusChange = true;
+        }
+      }
+    }
     
-    await KV.put('auto_check_status', isActive ? 'active' : 'inactive');
+    // 保存更新后的链接状态
+    await KV.put('subscription_links', JSON.stringify(links));
     await KV.put('last_auto_check', convertToBeijingTime(new Date()));
     
-    const statusText = isActive ? '正常' : '异常';
-    let result = `✅ 链接检查完成: ${statusText}`;
-    
-    // 状态变化通知 - 这些通知不受定时任务报告开关影响
-    if (previousStatus === 'active' && !isActive) {
-      const message = `🔴 <b>订阅链接异常</b>\n\n` +
-                     `链接: ${config.SUBSCRIPTION_URL}\n` +
-                     `状态: 连接失败\n` +
-                     `时间: ${convertToBeijingTime(new Date())}\n` +
-                     `请及时检查服务状态。`;
-      
-      await sendTelegramMessage(KV, message);
-      result += ' 🔴 (已发送异常通知)';
-    }
-    
-    if (previousStatus === 'inactive' && isActive) {
-      const message = `🟢 <b>订阅链接已恢复</b>\n\n` +
-                     `链接: ${config.SUBSCRIPTION_URL}\n` +
-                     `状态: 连接正常\n` +
-                     `时间: ${convertToBeijingTime(new Date())}\n` +
-                     `服务已恢复正常。`;
-      
-      await sendTelegramMessage(KV, message);
-      result += ' 🟢 (已发送恢复通知)';
-    }
-    
-    return result;
+    return `链接检查完成:\n${results.join('\n')}`;
     
   } catch (error) {
-    const previousStatus = await KV.get('auto_check_status');
-    await KV.put('auto_check_status', 'error');
-    await KV.put('last_auto_check', convertToBeijingTime(new Date()));
-    
-    let result = `❌ 链接检查失败: ${error.message}`;
-    
-    if (previousStatus === 'active') {
-      const config = await getConfigFromKV(KV);
-      const message = `🔴 <b>订阅链接检查失败</b>\n\n` +
-                     `链接: ${config.SUBSCRIPTION_URL}\n` +
-                     `错误: ${error.message}\n` +
-                     `时间: ${convertToBeijingTime(new Date())}\n` +
-                     `请检查网络连接或服务状态。`;
-      
-      await sendTelegramMessage(KV, message);
-      result += ' 🔴 (已发送失败通知)';
-    }
-    
-    return result;
+    return `❌ 链接检查过程出错: ${error.message}`;
   }
 }
 
 // 处理链接检查API
-async function handleCheckLink(CONFIG, KV) {
+async function handleCheckLinks(CONFIG, KV) {
   try {
-    const response = await fetch(CONFIG.SUBSCRIPTION_URL, {
-      method: 'HEAD',
-      signal: AbortSignal.timeout(5000)
-    });
+    const links = CONFIG.LINKS || [];
+    const checkResults = [];
     
-    const isActive = response.ok || (response.status >= 200 && response.status < 400);
-    let lastModified = await KV.get('last_updated');
-    
-    if (!lastModified) {
-      lastModified = convertToBeijingTime(new Date());
+    for (const link of links) {
+      if (!link.url || link.url === 'https://xx') {
+        checkResults.push({
+          id: link.id,
+          name: link.name,
+          active: false,
+          error: '链接未配置',
+          lastModified: link.lastUpdated || '从未更新'
+        });
+        continue;
+      }
+      
+      try {
+        const response = await fetch(link.url, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(5000)
+        });
+        
+        const isActive = response.ok || (response.status >= 200 && response.status < 400);
+        
+        checkResults.push({
+          id: link.id,
+          name: link.name,
+          active: isActive,
+          status: response.status,
+          lastModified: link.lastUpdated || '从未更新'
+        });
+      } catch (error) {
+        checkResults.push({
+          id: link.id,
+          name: link.name,
+          active: false,
+          error: error.message,
+          lastModified: link.lastUpdated || '从未更新'
+        });
+      }
     }
     
-    return new Response(JSON.stringify({ 
-      active: isActive,
-      status: response.status,
-      lastModified: lastModified
-    }), {
+    return new Response(JSON.stringify({ links: checkResults }), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
@@ -382,9 +435,8 @@ async function handleCheckLink(CONFIG, KV) {
     });
   } catch (error) {
     return new Response(JSON.stringify({ 
-      active: false,
       error: error.message,
-      lastModified: null
+      links: []
     }), {
       headers: {
         'Content-Type': 'application/json',
@@ -438,7 +490,7 @@ async function resetDailyStats(KV) {
 }
 
 // 记录统计事件（支持IP去重）
-async function recordStat(KV, statType, clientIP) {
+async function recordStat(KV, statType, clientIP, linkId = null) {
   const today = getBeijingDateString();
   const lastResetDate = await KV.get('stats_reset_date');
   
@@ -452,8 +504,11 @@ async function recordStat(KV, statType, clientIP) {
     return;
   }
   
-  // 检查IP是否已经记录过该事件
-  const ipSetKey = `daily_${statType}_ips_${today}`;
+  // 检查IP是否已经记录过该事件（如果指定了linkId，则按linkId去重）
+  const ipSetKey = linkId ? 
+    `daily_${statType}_ips_${today}_${linkId}` : 
+    `daily_${statType}_ips_${today}`;
+    
   const existingIPs = await KV.get(ipSetKey);
   let ipSet = existingIPs ? new Set(JSON.parse(existingIPs)) : new Set();
   
@@ -494,6 +549,8 @@ async function getStats(KV) {
   const chatId = await KV.get('telegram_chat_id');
   const ignoredIP = await KV.get('ignored_ip') || '未设置';
   const cronReportEnabled = await KV.get('cron_report_enabled');
+  const telegramButtonText = await KV.get('telegram_button_text') || '加入 Telegram 交流群组';
+  const telegramButtonHidden = await KV.get('telegram_button_hidden');
   
   return {
     page_views: parseInt(await KV.get('daily_page_views') || '0'),
@@ -504,6 +561,8 @@ async function getStats(KV) {
     telegram_configured: !!(botToken && chatId),
     ignored_ip: ignoredIP,
     cron_report_enabled: cronReportEnabled !== 'false',
+    telegram_button_text: telegramButtonText,
+    telegram_button_hidden: telegramButtonHidden === 'true',
     reset_date: lastResetDate || today
   };
 }
@@ -512,11 +571,12 @@ async function getStats(KV) {
 async function handleStats(request, KV) {
   if (request.method === 'POST') {
     try {
-      const { type } = await request.json();
+      const data = await request.json();
+      const { type, linkId } = data;
       const clientInfo = getClientInfo(request);
       
       if (['copy_clicks', 'telegram_clicks'].includes(type)) {
-        await recordStat(KV, type, clientInfo.ip);
+        await recordStat(KV, type, clientInfo.ip, linkId);
       }
       
       return new Response(JSON.stringify({ success: true }), {
@@ -594,20 +654,49 @@ async function handleTestTelegram(request, KV) {
 
 // 从KV获取配置
 async function getConfigFromKV(KV) {
-  const subscriptionUrl = await KV.get('subscription_url');
   const telegramGroup = await KV.get('telegram_group');
   const telegramBotToken = await KV.get('telegram_bot_token');
   const telegramChatId = await KV.get('telegram_chat_id');
   const ignoredIP = await KV.get('ignored_ip');
   const cronReportEnabled = await KV.get('cron_report_enabled');
+  const telegramButtonText = await KV.get('telegram_button_text');
+  const telegramButtonHidden = await KV.get('telegram_button_hidden');
+  
+  // 获取链接列表
+  let links = [];
+  try {
+    const linksData = await KV.get('subscription_links');
+    if (linksData) {
+      links = JSON.parse(linksData);
+    } else {
+      // 兼容旧版本：从单个链接迁移
+      const oldUrl = await KV.get('subscription_url');
+      if (oldUrl && oldUrl !== 'https://xx') {
+        links = [{
+          id: '1',
+          name: '默认订阅',
+          url: oldUrl,
+          description: '从旧版本迁移',
+          order: 0,
+          status: 'unknown',
+          lastUpdated: await KV.get('last_updated') || convertToBeijingTime(new Date())
+        }];
+        await KV.put('subscription_links', JSON.stringify(links));
+      }
+    }
+  } catch (error) {
+    console.error('获取链接配置失败:', error);
+  }
   
   return {
-    SUBSCRIPTION_URL: subscriptionUrl || 'https://xx',
+    LINKS: links,
     TELEGRAM_GROUP: telegramGroup || 'https://t.me',
     TELEGRAM_BOT_TOKEN: telegramBotToken || '',
     TELEGRAM_CHAT_ID: telegramChatId || '',
     IGNORED_IP: ignoredIP || '',
-    CRON_REPORT_ENABLED: cronReportEnabled !== 'false'
+    CRON_REPORT_ENABLED: cronReportEnabled !== 'false',
+    TELEGRAM_BUTTON_TEXT: telegramButtonText || '加入 Telegram 交流群组',
+    TELEGRAM_BUTTON_HIDDEN: telegramButtonHidden === 'true'
   };
 }
 
@@ -763,19 +852,21 @@ async function handleUpdateConfig(request, KV) {
   
   try {
     const formData = await request.formData();
-    const subscriptionUrl = formData.get('subscription_url');
     const telegramGroup = formData.get('telegram_group');
     const telegramBotToken = formData.get('telegram_bot_token');
     const telegramChatId = formData.get('telegram_chat_id');
     const ignoredIP = formData.get('ignored_ip');
     const cronReportEnabled = formData.get('cron_report_enabled') === 'on';
+    const telegramButtonText = formData.get('telegram_button_text');
+    const telegramButtonHidden = formData.get('telegram_button_hidden') === 'on';
     
-    await KV.put('subscription_url', subscriptionUrl);
     await KV.put('telegram_group', telegramGroup);
     await KV.put('telegram_bot_token', telegramBotToken);
     await KV.put('telegram_chat_id', telegramChatId);
     await KV.put('ignored_ip', ignoredIP);
     await KV.put('cron_report_enabled', cronReportEnabled ? 'true' : 'false');
+    await KV.put('telegram_button_text', telegramButtonText);
+    await KV.put('telegram_button_hidden', telegramButtonHidden ? 'true' : 'false');
     
     const currentBeijingTime = convertToBeijingTime(new Date());
     await KV.put('last_updated', currentBeijingTime);
@@ -794,9 +885,254 @@ async function handleUpdateConfig(request, KV) {
   }
 }
 
+// 添加新链接
+async function handleAddLink(request, KV) {
+  const cookieHeader = request.headers.get('Cookie');
+  const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
+  
+  if (!isLoggedIn) {
+    return new Response(JSON.stringify({ success: false, error: '未授权访问' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+  
+  try {
+    const formData = await request.formData();
+    const name = formData.get('name');
+    const url = formData.get('url');
+    const description = formData.get('description') || '';
+    
+    if (!name || !url) {
+      return new Response(JSON.stringify({ success: false, error: '名称和URL不能为空' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    const config = await getConfigFromKV(KV);
+    const links = config.LINKS || [];
+    
+    // 生成唯一ID
+    const newId = Date.now().toString();
+    const newLink = {
+      id: newId,
+      name,
+      url,
+      description,
+      order: links.length,
+      status: 'unknown',
+      lastUpdated: convertToBeijingTime(new Date())
+    };
+    
+    links.push(newLink);
+    await KV.put('subscription_links', JSON.stringify(links));
+    
+    return new Response(JSON.stringify({ 
+      success: true, 
+      message: '链接添加成功',
+      link: newLink
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// 删除链接
+async function handleDeleteLink(request, KV) {
+  const cookieHeader = request.headers.get('Cookie');
+  const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
+  
+  if (!isLoggedIn) {
+    return new Response(JSON.stringify({ success: false, error: '未授权访问' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+  
+  try {
+    const { linkId } = await request.json();
+    
+    if (!linkId) {
+      return new Response(JSON.stringify({ success: false, error: '链接ID不能为空' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    const config = await getConfigFromKV(KV);
+    const links = config.LINKS || [];
+    
+    const filteredLinks = links.filter(link => link.id !== linkId);
+    
+    if (filteredLinks.length === links.length) {
+      return new Response(JSON.stringify({ success: false, error: '链接不存在' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // 重新排序
+    filteredLinks.forEach((link, index) => {
+      link.order = index;
+    });
+    
+    await KV.put('subscription_links', JSON.stringify(filteredLinks));
+    
+    return new Response(JSON.stringify({ 
+      success: true, 
+      message: '链接删除成功'
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// 更新链接
+async function handleUpdateLink(request, KV) {
+  const cookieHeader = request.headers.get('Cookie');
+  const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
+  
+  if (!isLoggedIn) {
+    return new Response(JSON.stringify({ success: false, error: '未授权访问' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+  
+  try {
+    const formData = await request.formData();
+    const linkId = formData.get('linkId');
+    const name = formData.get('name');
+    const url = formData.get('url');
+    const description = formData.get('description') || '';
+    
+    if (!linkId || !name || !url) {
+      return new Response(JSON.stringify({ success: false, error: '参数不能为空' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    const config = await getConfigFromKV(KV);
+    const links = config.LINKS || [];
+    
+    const linkIndex = links.findIndex(link => link.id === linkId);
+    if (linkIndex === -1) {
+      return new Response(JSON.stringify({ success: false, error: '链接不存在' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    links[linkIndex] = {
+      ...links[linkIndex],
+      name,
+      url,
+      description,
+      lastUpdated: convertToBeijingTime(new Date())
+    };
+    
+    await KV.put('subscription_links', JSON.stringify(links));
+    
+    return new Response(JSON.stringify({ 
+      success: true, 
+      message: '链接更新成功',
+      link: links[linkIndex]
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// 重新排序链接
+async function handleReorderLinks(request, KV) {
+  const cookieHeader = request.headers.get('Cookie');
+  const isLoggedIn = cookieHeader && cookieHeader.includes('admin_authenticated=true');
+  
+  if (!isLoggedIn) {
+    return new Response(JSON.stringify({ success: false, error: '未授权访问' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+  
+  try {
+    const { orderedIds } = await request.json();
+    
+    if (!orderedIds || !Array.isArray(orderedIds)) {
+      return new Response(JSON.stringify({ success: false, error: '参数无效' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    const config = await getConfigFromKV(KV);
+    const links = config.LINKS || [];
+    
+    // 创建ID到链接的映射
+    const linkMap = {};
+    links.forEach(link => {
+      linkMap[link.id] = link;
+    });
+    
+    // 按照新的顺序重新排列
+    const reorderedLinks = [];
+    orderedIds.forEach((id, index) => {
+      if (linkMap[id]) {
+        linkMap[id].order = index;
+        reorderedLinks.push(linkMap[id]);
+      }
+    });
+    
+    // 添加可能遗漏的链接（如果有的话）
+    links.forEach(link => {
+      if (!orderedIds.includes(link.id)) {
+        link.order = reorderedLinks.length;
+        reorderedLinks.push(link);
+      }
+    });
+    
+    await KV.put('subscription_links', JSON.stringify(reorderedLinks));
+    
+    return new Response(JSON.stringify({ 
+      success: true, 
+      message: '链接顺序已更新'
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 // ==================== 界面模板 ====================
 
-// 初始设置页面
+// 初始设置页面（保持不变）
 function getSetupHTML() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1014,7 +1350,7 @@ function getSetupHTML() {
 </html>`;
 }
 
-// 登录页面
+// 登录页面（保持不变）
 function getLoginHTML() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1213,7 +1549,7 @@ function getLoginHTML() {
 </html>`;
 }
 
-// 管理面板HTML
+// 管理面板HTML（已修改增加Telegram按钮自定义配置）
 function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, stats) {
   const statusConfig = {
     'active': { text: '正常', color: '#10b981' },
@@ -1228,20 +1564,54 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
     '<span style="color: #ef4444;">✗ 未配置</span>';
   
   const ignoredIPStatus = stats.ignored_ip && stats.ignored_ip !== '未设置' ? 
-    `<span style="color: #10b981;">✓ 已设置: ${stats.ignored_ip}</span>` : 
+    '<span style="color: #10b981;">✓ 已设置: ' + stats.ignored_ip + '</span>' : 
     '<span style="color: #ef4444;">✗ 未设置</span>';
 
   const cronReportStatus = stats.cron_report_enabled ?
     '<span style="color: #10b981;">✓ 已启用</span>' :
     '<span style="color: #ef4444;">✗ 已禁用</span>';
 
+  const telegramButtonStatus = stats.telegram_button_hidden ?
+    '<span style="color: #ef4444;">✗ 已隐藏</span>' :
+    '<span style="color: #10b981;">✓ 显示中</span>';
+
+  // 生成IP日志HTML
   const ipLogsHTML = stats.ip_logs && stats.ip_logs.length > 0 
-    ? stats.ip_logs.map(log => `
-        <div class="log-entry">
-          <div class="log-content">${log}</div>
-        </div>
-      `).join('')
+    ? stats.ip_logs.map(log => {
+        return '<div class="log-entry">' +
+                 '<div class="log-content">' + log + '</div>' +
+               '</div>';
+      }).join('')
     : '<div class="empty-state">暂无访问日志</div>';
+
+  // 链接管理部分
+  const links = config.LINKS || [];
+  const linksHTML = links.length > 0 
+    ? links.sort((a, b) => (a.order || 0) - (b.order || 0)).map(link => {
+        const linkStatus = statusConfig[link.status] || statusConfig.unknown;
+        return '<div class="link-item" data-id="' + link.id + '">' +
+                 '<div class="link-drag-handle">⋮⋮</div>' +
+                 '<div class="link-content">' +
+                   '<div class="link-header">' +
+                     '<h4>' + link.name + '</h4>' +
+                     '<div class="link-status ' + (link.status || 'unknown') + '">' +
+                       linkStatus.text +
+                     '</div>' +
+                   '</div>' +
+                   '<div class="link-url">' + link.url + '</div>' +
+                   (link.description ? '<div class="link-description">' + link.description + '</div>' : '') +
+                   '<div class="link-meta">' +
+                     '最后更新: ' + (link.lastUpdated || '从未更新') + ' | ' +
+                     '最后检查: ' + (link.lastChecked || '从未检查') +
+                   '</div>' +
+                 '</div>' +
+                 '<div class="link-actions">' +
+                   '<button class="edit-link" onclick="editLink(\'' + link.id + '\')">编辑</button>' +
+                   '<button class="delete-link" onclick="deleteLink(\'' + link.id + '\')">删除</button>' +
+                 '</div>' +
+               '</div>';
+      }).join('')
+    : '<div class="empty-state">暂无订阅链接，请添加您的第一个链接</div>';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1351,7 +1721,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             font-weight: 500; 
         }
         
-        input { 
+        input, textarea { 
             width: 100%; 
             padding: 0.875rem; 
             border: 2px solid var(--border-color); 
@@ -1360,7 +1730,12 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             transition: all 0.3s ease;
         }
         
-        input:focus {
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        
+        input:focus, textarea:focus {
             outline: none;
             border-color: #667eea;
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
@@ -1406,6 +1781,10 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
         
         .button-warning {
             background: var(--warning-color);
+        }
+        
+        .button-danger {
+            background: var(--error-color);
         }
         
         .message { 
@@ -1536,9 +1915,192 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             margin: 2rem 0;
         }
         
+        /* 链接管理样式 */
+        .links-container {
+            margin-bottom: 2rem;
+        }
+        
+        .link-item {
+            display: flex;
+            align-items: center;
+            padding: 1.5rem;
+            background: var(--bg-gray);
+            border-radius: 12px;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+            cursor: move;
+        }
+        
+        .link-item:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            border-color: #667eea;
+        }
+        
+        .link-item.dragging {
+            opacity: 0.5;
+            background: #e5e7eb;
+        }
+        
+        .link-drag-handle {
+            padding: 0.5rem 1rem;
+            color: var(--text-secondary);
+            cursor: move;
+            font-size: 1.25rem;
+            user-select: none;
+        }
+        
+        .link-content {
+            flex: 1;
+            margin: 0 1rem;
+        }
+        
+        .link-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .link-header h4 {
+            margin: 0;
+            font-size: 1.125rem;
+            color: var(--text-primary);
+        }
+        
+        .link-status {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .link-status.active {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        
+        .link-status.inactive {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        
+        .link-status.error {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        
+        .link-status.unknown {
+            background: #e5e7eb;
+            color: #4b5563;
+        }
+        
+        .link-url {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            word-break: break-all;
+        }
+        
+        .link-description {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            line-height: 1.4;
+        }
+        
+        .link-meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        
+        .link-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .link-actions button {
+            padding: 0.5rem 1rem;
+            font-size: 0.75rem;
+        }
+        
+        .add-link-form {
+            background: var(--bg-gray);
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 2px dashed var(--border-color);
+            margin-bottom: 2rem;
+        }
+        
+        .add-link-form.hidden {
+            display: none;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .modal-content {
+            background: white;
+            border-radius: 20px;
+            padding: 2rem;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+        
+        .modal-header h3 {
+            margin: 0;
+        }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+        }
+        
         @media (max-width: 1024px) {
             .two-column { 
                 grid-template-columns: 1fr; 
+            }
+            
+            .link-item {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .link-drag-handle {
+                align-self: flex-start;
+                margin-bottom: 1rem;
+            }
+            
+            .link-content {
+                margin: 1rem 0;
+            }
+            
+            .link-actions {
+                align-self: flex-end;
             }
         }
         
@@ -1552,6 +2114,10 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
+            
+            .card {
+                padding: 1.5rem;
+            }
         }
         
         @media (max-width: 480px) {
@@ -1560,7 +2126,18 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             }
             
             .card {
-                padding: 1.5rem;
+                padding: 1.25rem;
+            }
+            
+            .link-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.5rem;
+            }
+            
+            .link-actions {
+                width: 100%;
+                justify-content: flex-end;
             }
         }
     </style>
@@ -1605,13 +2182,14 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                         <strong>统计重置日期:</strong> ${stats.reset_date} (每日北京时间 00:00 自动重置)<br>
                         <strong>忽略IP设置:</strong> ${ignoredIPStatus}<br>
                         <strong>定时任务报告:</strong> ${cronReportStatus}<br>
+                        <strong>Telegram按钮:</strong> ${telegramButtonStatus}<br>
                         <strong>统计规则:</strong> 同一IP的多次复制或TG点击在一天内只计算一次
                     </div>
                 </div>
                 
-                <!-- 配置表单 -->
+                <!-- 订阅链接管理 -->
                 <div class="card">
-                    <h2>配置管理</h2>
+                    <h2>订阅链接管理</h2>
                     <div id="message" class="message"></div>
                     
                     <div class="info-box">
@@ -1620,18 +2198,51 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                         <strong>自动检查状态:</strong> 
                         <span class="status-badge" style="background: ${status.color}">${status.text}</span><br>
                         <strong>Telegram通知:</strong> ${telegramStatus}<br>
-                        <strong>定时任务报告:</strong> ${cronReportStatus}
+                        <strong>定时任务报告:</strong> ${cronReportStatus}<br>
+                        <strong>链接数量:</strong> ${links.length} 个
                     </div>
                     
+                    <div class="links-container" id="linksContainer">
+                        ${linksHTML}
+                    </div>
+                    
+                    <div class="add-link-form" id="addLinkForm">
+                        <h3>添加新链接</h3>
+                        <form id="newLinkForm">
+                            <div class="form-group">
+                                <label for="linkName">链接名称</label>
+                                <input type="text" id="linkName" name="name" required 
+                                       placeholder="例如：主订阅链接">
+                            </div>
+                            <div class="form-group">
+                                <label for="linkUrl">订阅链接URL</label>
+                                <input type="url" id="linkUrl" name="url" required 
+                                       placeholder="https://snippets.vlato.site">
+                            </div>
+                            <div class="form-group">
+                                <label for="linkDescription">描述（可选）</label>
+                                <textarea id="linkDescription" name="description" 
+                                          placeholder="添加一些描述信息，例如：备用节点、地区限制等"></textarea>
+                            </div>
+                            <div style="display: flex; gap: 1rem;">
+                                <button type="submit" class="button-success">添加链接</button>
+                                <button type="button" onclick="hideAddLinkForm()" class="button-secondary">取消</button>
+                            </div>
+                        </form>
+                    </div>
+                    
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem;">
+                        <button onclick="showAddLinkForm()" class="button-success">+ 添加新链接</button>
+                        <button onclick="testTelegram()" class="button-warning">测试通知</button>
+                        <button onclick="window.location.href='/'">返回主页</button>
+                    </div>
+                </div>
+                
+                <!-- 其他配置 -->
+                <div class="card">
+                    <h2>系统配置</h2>
                     <form id="configForm">
                         <h3>基本配置</h3>
-                        <div class="form-group">
-                            <label for="subscription_url">订阅链接</label>
-                            <input type="url" id="subscription_url" name="subscription_url" 
-                                   value="${config.SUBSCRIPTION_URL}" required 
-                                   placeholder="https://snippets.vlato.site">
-                        </div>
-                        
                         <div class="form-group">
                             <label for="telegram_group">Telegram群组链接</label>
                             <input type="url" id="telegram_group" name="telegram_group" 
@@ -1675,6 +2286,29 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                             </div>
                         </div>
                         
+                        <div class="section-divider"></div>
+                        
+                        <h3>主页按钮配置</h3>
+                        <div class="form-group">
+                            <label for="telegram_button_text">Telegram按钮文字</label>
+                            <input type="text" id="telegram_button_text" name="telegram_button_text" 
+                                   value="${config.TELEGRAM_BUTTON_TEXT}" 
+                                   placeholder="例如：加入 Telegram 交流群组">
+                            <div class="help-text">
+                                自定义主页Telegram按钮显示的文字内容
+                            </div>
+                        </div>
+                        
+                        <div class="form-group">
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="telegram_button_hidden" name="telegram_button_hidden" ${config.TELEGRAM_BUTTON_HIDDEN ? 'checked' : ''}>
+                                <label for="telegram_button_hidden">隐藏Telegram按钮</label>
+                            </div>
+                            <div class="help-text">
+                                勾选后，主页将不显示Telegram按钮
+                            </div>
+                        </div>
+                        
                         <div class="form-group">
                             <div class="checkbox-group">
                                 <input type="checkbox" id="cron_report_enabled" name="cron_report_enabled" ${config.CRON_REPORT_ENABLED ? 'checked' : ''}>
@@ -1685,11 +2319,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                             </div>
                         </div>
                         
-                        <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-                            <button type="submit">更新配置</button>
-                            <button type="button" onclick="testTelegram()" class="button-success">测试通知</button>
-                            <button type="button" onclick="window.location.href='/'" class="button-secondary">返回主页</button>
-                        </div>
+                        <button type="submit">更新配置</button>
                     </form>
                 </div>
             </div>
@@ -1711,7 +2341,236 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
         </div>
     </div>
     
+    <!-- 编辑链接模态框 -->
+    <div class="modal" id="editLinkModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑链接</h3>
+                <button class="modal-close" onclick="closeEditModal()">×</button>
+            </div>
+            <form id="editLinkForm">
+                <input type="hidden" id="editLinkId" name="linkId">
+                <div class="form-group">
+                    <label for="editLinkName">链接名称</label>
+                    <input type="text" id="editLinkName" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="editLinkUrl">订阅链接URL</label>
+                    <input type="url" id="editLinkUrl" name="url" required>
+                </div>
+                <div class="form-group">
+                    <label for="editLinkDescription">描述（可选）</label>
+                    <textarea id="editLinkDescription" name="description"></textarea>
+                </div>
+                <div style="display: flex; gap: 1rem;">
+                    <button type="submit" class="button-success">保存更改</button>
+                    <button type="button" onclick="closeEditModal()" class="button-secondary">取消</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
     <script>
+        // 拖拽排序功能
+        let draggedItem = null;
+        
+        function initializeDragAndDrop() {
+            const container = document.getElementById('linksContainer');
+            const items = container.querySelectorAll('.link-item');
+            
+            items.forEach(item => {
+                item.setAttribute('draggable', true);
+                
+                item.addEventListener('dragstart', (e) => {
+                    draggedItem = item;
+                    setTimeout(() => {
+                        item.classList.add('dragging');
+                    }, 0);
+                });
+                
+                item.addEventListener('dragend', () => {
+                    draggedItem = null;
+                    item.classList.remove('dragging');
+                });
+                
+                item.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    const afterElement = getDragAfterElement(container, e.clientY);
+                    if (afterElement == null) {
+                        container.appendChild(draggedItem);
+                    } else {
+                        container.insertBefore(draggedItem, afterElement);
+                    }
+                });
+            });
+        }
+        
+        function getDragAfterElement(container, y) {
+            const draggableElements = [...container.querySelectorAll('.link-item:not(.dragging)')];
+            
+            return draggableElements.reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - box.height / 2;
+                
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset: offset, element: child };
+                } else {
+                    return closest;
+                }
+            }, { offset: Number.NEGATIVE_INFINITY }).element;
+        }
+        
+        function saveLinkOrder() {
+            const container = document.getElementById('linksContainer');
+            const items = container.querySelectorAll('.link-item');
+            const orderedIds = Array.from(items).map(item => item.dataset.id);
+            
+            fetch('/admin/api/reorder-links', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ orderedIds: orderedIds })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    showMessage('链接顺序已保存', 'success');
+                } else {
+                    showMessage('保存失败: ' + result.error, 'error');
+                }
+            })
+            .catch(error => {
+                showMessage('网络错误: ' + error.message, 'error');
+            });
+        }
+        
+        // 初始化拖拽
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeDragAndDrop();
+            
+            // 拖拽结束后保存顺序
+            document.addEventListener('dragend', saveLinkOrder);
+        });
+        
+        function showAddLinkForm() {
+            document.getElementById('addLinkForm').classList.remove('hidden');
+        }
+        
+        function hideAddLinkForm() {
+            document.getElementById('addLinkForm').classList.add('hidden');
+            document.getElementById('newLinkForm').reset();
+        }
+        
+        // 添加新链接
+        document.getElementById('newLinkForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            const button = this.querySelector('button[type="submit"]');
+            const originalText = button.textContent;
+            
+            button.textContent = '添加中...';
+            button.disabled = true;
+            
+            try {
+                const response = await fetch('/admin/api/add-link', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showMessage('链接添加成功', 'success');
+                    this.reset();
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showMessage('错误: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showMessage('网络错误: ' + error.message, 'error');
+            } finally {
+                button.textContent = originalText;
+                button.disabled = false;
+            }
+        });
+        
+        // 删除链接
+        async function deleteLink(linkId) {
+            if (!confirm('确定要删除这个链接吗？')) return;
+            
+            try {
+                const response = await fetch('/admin/api/delete-link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ linkId: linkId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showMessage('链接删除成功', 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showMessage('错误: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showMessage('网络错误: ' + error.message, 'error');
+            }
+        }
+        
+        // 编辑链接
+        function editLink(linkId) {
+            const linkItem = document.querySelector('.link-item[data-id="' + linkId + '"]');
+            const name = linkItem.querySelector('h4').textContent;
+            const url = linkItem.querySelector('.link-url').textContent;
+            const description = linkItem.querySelector('.link-description') ? linkItem.querySelector('.link-description').textContent : '';
+            
+            document.getElementById('editLinkId').value = linkId;
+            document.getElementById('editLinkName').value = name;
+            document.getElementById('editLinkUrl').value = url;
+            document.getElementById('editLinkDescription').value = description;
+            
+            document.getElementById('editLinkModal').style.display = 'flex';
+        }
+        
+        function closeEditModal() {
+            document.getElementById('editLinkModal').style.display = 'none';
+            document.getElementById('editLinkForm').reset();
+        }
+        
+        // 提交编辑
+        document.getElementById('editLinkForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            const button = this.querySelector('button[type="submit"]');
+            const originalText = button.textContent;
+            
+            button.textContent = '保存中...';
+            button.disabled = true;
+            
+            try {
+                const response = await fetch('/admin/api/update-link', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showMessage('链接更新成功', 'success');
+                    closeEditModal();
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showMessage('错误: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showMessage('网络错误: ' + error.message, 'error');
+            } finally {
+                button.textContent = originalText;
+                button.disabled = false;
+            }
+        });
+        
+        // 配置表单
         document.getElementById('configForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             const formData = new FormData(this);
@@ -1728,23 +2587,15 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                 });
                 
                 const result = await response.json();
-                const message = document.getElementById('message');
                 
                 if (result.success) {
-                    message.textContent = result.message + ' 最后更新: ' + result.lastUpdated;
-                    message.className = 'message success';
-                    message.style.display = 'block';
+                    showMessage(result.message + ' 最后更新: ' + result.lastUpdated, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
-                    message.textContent = '错误：' + result.error;
-                    message.className = 'message error';
-                    message.style.display = 'block';
+                    showMessage('错误: ' + result.error, 'error');
                 }
             } catch (error) {
-                const message = document.getElementById('message');
-                message.textContent = '网络错误：' + error.message;
-                message.className = 'message error';
-                message.style.display = 'block';
+                showMessage('网络错误: ' + error.message, 'error');
             } finally {
                 button.textContent = originalText;
                 button.disabled = false;
@@ -1752,7 +2603,7 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
         });
         
         async function testTelegram() {
-            const button = document.querySelector('button.button-success');
+            const button = document.querySelector('button.button-warning');
             const originalText = button.textContent;
             
             button.textContent = '发送中...';
@@ -1764,22 +2615,14 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
                 });
                 
                 const result = await response.json();
-                const message = document.getElementById('message');
                 
                 if (result.success) {
-                    message.textContent = result.message;
-                    message.className = 'message success';
-                    message.style.display = 'block';
+                    showMessage(result.message, 'success');
                 } else {
-                    message.textContent = '错误：' + result.error;
-                    message.className = 'message error';
-                    message.style.display = 'block';
+                    showMessage('错误: ' + result.error, 'error');
                 }
             } catch (error) {
-                const message = document.getElementById('message');
-                message.textContent = '网络错误：' + error.message;
-                message.className = 'message error';
-                message.style.display = 'block';
+                showMessage('网络错误: ' + error.message, 'error');
             } finally {
                 button.textContent = originalText;
                 button.disabled = false;
@@ -1790,13 +2633,60 @@ function getAdminPanelHTML(config, lastUpdated, lastAutoCheck, autoCheckStatus, 
             await fetch('/admin/api/logout');
             window.location.href = '/admin';
         }
+        
+        function showMessage(text, type) {
+            const message = document.getElementById('message');
+            message.textContent = text;
+            message.className = 'message ' + type;
+            message.style.display = 'block';
+            
+            setTimeout(function() {
+                message.style.display = 'none';
+            }, 5000);
+        }
     </script>
 </body>
 </html>`;
 }
 
-// 主页面HTML - 优化移动端间距版本
-function getHTML(subscriptionUrl, telegramGroup) {
+// 主页面HTML - 支持Telegram按钮自定义配置
+function getHTML(links, telegramGroup, telegramButtonText = '加入 Telegram 交流群组', telegramButtonHidden = false) {
+  // 对链接进行排序
+  const sortedLinks = (links || []).sort((a, b) => (a.order || 0) - (b.order || 0));
+  
+  // 生成链接HTML
+  const linksHTML = sortedLinks.map(link => {
+    return '<div class="link-card" data-id="' + link.id + '">' +
+             '<div class="link-header">' +
+               '<div class="link-title">' +
+                 '<div class="link-icon">🔗</div>' +
+                 '<h3>' + link.name + '</h3>' +
+               '</div>' +
+               '<div class="link-status checking" id="status-' + link.id + '">' +
+                 '<span class="status-dot"></span>' +
+                 '<span class="status-text">检测中...</span>' +
+               '</div>' +
+             '</div>' +
+             (link.description ? '<div class="link-description">' + link.description + '</div>' : '') +
+             '<div class="link-url-container">' +
+               '<div class="link-url" id="url-' + link.id + '">' + link.url + '</div>' +
+               '<button class="copy-btn" data-link-id="' + link.id + '">' +
+                 '<span class="copy-text">复制</span>' +
+                 '<span class="copied-text">✅ 已复制</span>' +
+               '</button>' +
+             '</div>' +
+             '<div class="link-meta" id="meta-' + link.id + '">最后更新: 检测中...</div>' +
+           '</div>';
+  }).join('');
+
+  // 生成Telegram按钮HTML（根据配置决定是否显示）
+  const telegramButtonHTML = telegramButtonHidden ? '' : 
+    '<div class="actions">' +
+      '<a href="' + telegramGroup + '" target="_blank" id="tgButton" class="button button-cyan">' +
+        '<span>📢 ' + telegramButtonText + '</span>' +
+      '</a>' +
+    '</div>';
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1812,6 +2702,8 @@ function getHTML(subscriptionUrl, telegramGroup) {
             --text-primary: #1f2937;
             --text-secondary: #6b7280;
             --bg-white: #ffffff;
+            --bg-gray: #f8fafc;
+            --border-color: #e5e7eb;
             --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.3);
             --shadow-md: 0 10px 25px rgba(0, 0, 0, 0.1);
             --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.1);
@@ -1827,26 +2719,27 @@ function getHTML(subscriptionUrl, telegramGroup) {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--primary-gradient);
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
             padding: 20px;
             line-height: 1.6;
         }
 
-        .card {
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .main-card {
             background: var(--bg-white);
             border-radius: 24px;
             padding: 2.5rem 2rem;
             width: 100%;
-            max-width: 440px;
             box-shadow: var(--shadow-lg);
-            text-align: center;
             position: relative;
             overflow: hidden;
+            margin-bottom: 2rem;
         }
 
-        .card::before {
+        .main-card::before {
             content: '';
             position: absolute;
             top: 0;
@@ -1854,6 +2747,11 @@ function getHTML(subscriptionUrl, telegramGroup) {
             right: 0;
             height: 5px;
             background: var(--primary-gradient);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
         }
 
         .icon {
@@ -1864,7 +2762,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
             display: flex;
             justify-content: center;
             align-items: center;
-            margin: 0 auto 2rem;
+            margin: 0 auto 1.5rem;
             box-shadow: var(--shadow-md);
             transition: transform 0.3s ease;
         }
@@ -1886,83 +2784,208 @@ function getHTML(subscriptionUrl, telegramGroup) {
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-            margin-bottom: 1rem;
+            margin-bottom: 0.5rem;
             letter-spacing: -0.5px;
             line-height: 1.2;
         }
 
-        .status {
-            color: white;
-            padding: 0.75rem 1.25rem;
-            border-radius: 50px;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.9rem;
-            font-weight: 600;
-            margin-bottom: 1.25rem;
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .links-container {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .link-card {
+            background: var(--bg-white);
+            border-radius: 16px;
+            padding: 1.5rem;
+            border: 2px solid var(--border-color);
             transition: all 0.3s ease;
             box-shadow: var(--shadow-sm);
-            min-height: 44px;
         }
 
-        .status.active {
-            background: var(--success-color);
+        .link-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            border-color: #667eea;
         }
 
-        .status.inactive {
-            background: var(--error-color);
+        .link-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
-        .status.checking {
-            background: var(--warning-color);
+        .link-title {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
         }
 
-        .status::before {
-            font-size: 1rem;
-            font-weight: bold;
+        .link-icon {
+            font-size: 1.5rem;
         }
 
-        .status.active::before {
-            content: "✓";
+        .link-title h3 {
+            font-size: 1.25rem;
+            color: var(--text-primary);
+            margin: 0;
         }
 
-        .status.inactive::before {
-            content: "✗";
+        .link-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            min-width: 120px;
+            justify-content: center;
         }
 
-        .status.checking::before {
-            content: "⟳";
-            animation: rotate 1s linear infinite;
+        .link-status.checking {
+            background: #fef3c7;
+            color: #92400e;
         }
 
-        .update-time {
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            margin-bottom: 2rem;
-            background: #f8fafc;
-            padding: 0.75rem 1rem;
-            border-radius: 12px;
+        .link-status.active {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .link-status.inactive {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .link-status.error {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
             display: inline-block;
-            border: 1px solid #e2e8f0;
-            line-height: 1.4;
         }
 
-        @keyframes rotate {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
+        .link-status.checking .status-dot {
+            background: #f59e0b;
+            animation: pulse 1.5s infinite;
         }
 
-        .description {
+        .link-status.active .status-dot {
+            background: #10b981;
+        }
+
+        .link-status.inactive .status-dot {
+            background: #ef4444;
+        }
+
+        .link-status.error .status-dot {
+            background: #f59e0b;
+        }
+
+        .link-description {
             color: var(--text-secondary);
-            font-size: 1rem;
-            margin-bottom: 2rem;
-            line-height: 1.6;
-            padding: 0 0.5rem;
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
+            line-height: 1.5;
+            padding-left: 2.25rem;
+        }
+
+        .link-url-container {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 0.75rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .link-url {
+            flex: 1;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            background: var(--bg-gray);
+            padding: 0.875rem 1rem;
+            border-radius: 12px;
+            word-break: break-all;
+            min-width: 200px;
+            border: 1px solid var(--border-color);
+        }
+
+        .copy-btn {
+            padding: 0.875rem 1.5rem;
+            background: var(--primary-gradient);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 100px;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .copy-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .copy-btn.copied {
+            background: linear-gradient(135deg, var(--success-color) 0%, #059669 100%);
+        }
+
+        .copy-text, .copied-text {
+            transition: opacity 0.3s ease;
+        }
+
+        .copied-text {
+            position: absolute;
+            opacity: 0;
+        }
+
+        .copy-btn.copied .copy-text {
+            opacity: 0;
+        }
+
+        .copy-btn.copied .copied-text {
+            opacity: 1;
+        }
+
+        .link-meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-align: right;
+            padding-left: 2.25rem;
+        }
+
+        .actions {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
         }
 
         .button {
-            width: 100%;
+            flex: 1;
             padding: 1.125rem 1.5rem;
             border: none;
             border-radius: 16px;
@@ -1974,26 +2997,10 @@ function getHTML(subscriptionUrl, telegramGroup) {
             align-items: center;
             justify-content: center;
             gap: 0.75rem;
-            margin-bottom: 1rem;
             text-decoration: none;
             color: white;
-            position: relative;
-            overflow: hidden;
-            box-shadow: var(--shadow-sm);
             min-height: 56px;
-        }
-
-        .button::before {
-            font-size: 1.125rem;
-        }
-
-        .button-purple {
-            background: var(--primary-gradient);
-        }
-
-        .button-purple:hover {
-            transform: translateY(-2px);
-            box-shadow: var(--shadow-md);
+            box-shadow: var(--shadow-sm);
         }
 
         .button-cyan {
@@ -2005,43 +3012,6 @@ function getHTML(subscriptionUrl, telegramGroup) {
             box-shadow: 0 8px 25px rgba(8, 145, 178, 0.3);
         }
 
-        .button-copied {
-            background: linear-gradient(135deg, var(--success-color) 0%, #059669 100%) !important;
-            transform: scale(0.98);
-        }
-
-        .button::before {
-            font-size: 18px;
-        }
-
-        .button-purple::before {
-            content: "📄";
-        }
-
-        .button-cyan::before {
-            content: "✈";
-        }
-
-        .copy-feedback {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(16, 185, 129, 0.95);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-            border-radius: 16px;
-            font-weight: 600;
-        }
-
-        .copy-feedback.show {
-            opacity: 1;
-        }
-        
         .admin-link {
             display: inline-block;
             margin: 1.5rem 0 0.5rem;
@@ -2052,7 +3022,9 @@ function getHTML(subscriptionUrl, telegramGroup) {
             transition: color 0.3s ease;
             padding: 0.5rem 1rem;
             border-radius: 8px;
-            background: #f8fafc;
+            background: var(--bg-gray);
+            text-align: center;
+            width: 100%;
         }
 
         .admin-link::before {
@@ -2072,6 +3044,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
             font-size: 0.8rem;
             padding-top: 1rem;
             border-top: 1px solid #f1f5f9;
+            text-align: center;
         }
 
         .pulse {
@@ -2084,13 +3057,18 @@ function getHTML(subscriptionUrl, telegramGroup) {
             100% { transform: scale(1); }
         }
 
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
         /* 平板端优化 */
         @media (max-width: 768px) {
             body {
                 padding: 16px;
             }
             
-            .card {
+            .main-card {
                 padding: 2rem 1.5rem;
                 border-radius: 20px;
             }
@@ -2098,7 +3076,7 @@ function getHTML(subscriptionUrl, telegramGroup) {
             .icon {
                 width: 64px;
                 height: 64px;
-                margin-bottom: 1.75rem;
+                margin-bottom: 1.25rem;
             }
             
             .icon svg {
@@ -2108,25 +3086,32 @@ function getHTML(subscriptionUrl, telegramGroup) {
             
             h1 {
                 font-size: 2rem;
-                margin-bottom: 0.875rem;
             }
             
-            .status {
-                padding: 0.625rem 1.125rem;
-                font-size: 0.85rem;
-                margin-bottom: 1.125rem;
-                min-height: 40px;
+            .subtitle {
+                font-size: 1rem;
             }
             
-            .description {
-                font-size: 0.95rem;
-                margin-bottom: 1.75rem;
+            .link-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+            
+            .link-url-container {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .link-url {
+                min-width: auto;
+            }
+            
+            .copy-btn {
+                width: 100%;
             }
             
             .button {
-                padding: 1rem 1.25rem;
-                font-size: 0.95rem;
-                margin-bottom: 0.875rem;
                 min-height: 52px;
             }
         }
@@ -2135,21 +3120,18 @@ function getHTML(subscriptionUrl, telegramGroup) {
         @media (max-width: 480px) {
             body {
                 padding: 12px;
-                align-items: flex-start;
-                min-height: 100vh;
-                padding-top: 20px;
             }
             
-            .card {
+            .main-card {
                 padding: 1.75rem 1.25rem;
                 border-radius: 20px;
-                margin: 0;
+                margin-bottom: 1.5rem;
             }
             
             .icon {
                 width: 60px;
                 height: 60px;
-                margin-bottom: 1.5rem;
+                margin-bottom: 1rem;
                 border-radius: 16px;
             }
             
@@ -2160,59 +3142,56 @@ function getHTML(subscriptionUrl, telegramGroup) {
             
             h1 {
                 font-size: 1.75rem;
-                margin-bottom: 0.75rem;
             }
             
-            .status {
-                padding: 0.75rem 1rem;
-                font-size: 0.8rem;
-                margin-bottom: 1rem;
-                min-height: 44px;
+            .subtitle {
+                font-size: 0.95rem;
+            }
+            
+            .link-card {
+                padding: 1.25rem;
+            }
+            
+            .link-title h3 {
+                font-size: 1.125rem;
+            }
+            
+            .link-status {
                 width: 100%;
-                justify-content: center;
+                min-width: auto;
             }
             
-            .update-time {
-                font-size: 0.8rem;
-                margin-bottom: 1.5rem;
-                padding: 0.625rem 0.875rem;
-                width: 100%;
+            .link-description {
+                padding-left: 0;
+                margin-top: 0.5rem;
             }
             
-            .description {
-                font-size: 0.9rem;
-                margin-bottom: 1.5rem;
-                line-height: 1.5;
-                padding: 0;
+            .link-meta {
+                padding-left: 0;
+                text-align: left;
+            }
+            
+            .actions {
+                flex-direction: column;
             }
             
             .button {
-                padding: 1rem;
-                font-size: 0.9rem;
-                margin-bottom: 0.75rem;
-                min-height: 50px;
-                border-radius: 14px;
-            }
-            
-            .button::before {
-                font-size: 16px;
+                width: 100%;
             }
             
             .admin-link {
-                margin: 1.25rem 0 0.5rem;
+                margin: 1rem 0 0.5rem;
                 font-size: 0.85rem;
-                padding: 0.5rem 0.875rem;
             }
             
             .footer {
-                margin-top: 1.5rem;
                 font-size: 0.75rem;
             }
         }
 
         /* 小屏手机优化 */
         @media (max-width: 360px) {
-            .card {
+            .main-card {
                 padding: 1.5rem 1rem;
                 border-radius: 18px;
             }
@@ -2224,146 +3203,211 @@ function getHTML(subscriptionUrl, telegramGroup) {
             .icon {
                 width: 56px;
                 height: 56px;
-                margin-bottom: 1.25rem;
-            }
-            
-            .status {
-                padding: 0.625rem 0.875rem;
-                font-size: 0.75rem;
-            }
-            
-            .button {
-                padding: 0.875rem;
-                font-size: 0.85rem;
             }
         }
 
         /* 超大屏幕优化 */
         @media (min-width: 1200px) {
-            .card {
-                max-width: 480px;
+            .container {
+                max-width: 900px;
+            }
+            
+            .main-card {
                 padding: 3rem 2.5rem;
+            }
+        }
+        
+        /* 链接数量多时的优化 */
+        @media (max-height: 800px) and (min-width: 768px) {
+            .links-container {
+                max-height: 60vh;
+                overflow-y: auto;
+                padding-right: 0.5rem;
+            }
+            
+            .links-container::-webkit-scrollbar {
+                width: 6px;
+            }
+            
+            .links-container::-webkit-scrollbar-track {
+                background: #f1f1f1;
+                border-radius: 3px;
+            }
+            
+            .links-container::-webkit-scrollbar-thumb {
+                background: #c1c1c1;
+                border-radius: 3px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="card">
-        <div class="icon pulse">
-            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>
-            </svg>
-        </div>
-        
-        <h1>Hello Snippets!</h1>
-        
-        <div id="statusBadge" class="status checking">正在检测服务状态...</div>
-        
-        <p class="description">
-            您的代理服务正在正常运行，享受安全、快速的网络连接体验
-        </p>
-        
-        <div id="updateTime" class="update-time">检测更新时间...</div>
-        
-        <button id="copyButton" class="button button-purple">
-            <span>订阅链接（点击复制）</span>
-            <div id="copyFeedback" class="copy-feedback">
-                <span>✅ 已复制到剪贴板！</span>
+    <div class="container">
+        <div class="main-card">
+            <div class="header">
+                <div class="icon pulse">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>
+                    </svg>
+                </div>
+                
+                <h1>Hello Snippets!</h1>
+                <p class="subtitle">多订阅链接管理，选择适合您的服务</p>
             </div>
-        </button>
-        
-        <a href="${telegramGroup}" target="_blank" id="tgButton" class="button button-cyan">
-            <span>加入 Telegram 交流群组</span>
-        </a>
-        
-        <a href="/admin" class="admin-link">管理面板</a>
-        
-        <div class="footer">
-            Powered by Cloudflare Workers
+            
+            ${sortedLinks.length > 0 ? '<div class="links-container" id="linksContainer">' + linksHTML + '</div>' : 
+              '<div class="links-container">' +
+                '<div class="link-card" style="text-align: center; padding: 3rem 2rem;">' +
+                  '<div class="icon" style="margin: 0 auto 1rem;">' +
+                    '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+                      '<path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>' +
+                    '</svg>' +
+                  '</div>' +
+                  '<h3 style="color: var(--text-primary); margin-bottom: 0.5rem;">暂无订阅链接</h3>' +
+                  '<p style="color: var(--text-secondary);">请管理员在管理面板中添加订阅链接</p>' +
+                '</div>' +
+              '</div>'}
+            
+            ${telegramButtonHTML}
+            
+            <a href="/admin" class="admin-link">管理面板</a>
+            
+            <div class="footer">
+                Powered by Cloudflare Workers | 多订阅链接管理
+            </div>
         </div>
     </div>
 
     <script>
-        const subscriptionUrl = "${subscriptionUrl}";
-        const copyButton = document.getElementById('copyButton');
-        const copyFeedback = document.getElementById('copyFeedback');
-        const tgButton = document.getElementById('tgButton');
-
+        const links = ${JSON.stringify(sortedLinks)};
+        
         // 上报统计事件
-        async function recordStat(type) {
+        async function recordStat(type, linkId = null) {
             try {
                 await fetch('/api/stats', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: type })
+                    body: JSON.stringify({ type: type, linkId: linkId })
                 });
             } catch (error) {
                 console.log('统计上报失败:', error);
             }
         }
-
-        async function checkLinkStatus() {
-            const statusBadge = document.getElementById('statusBadge');
-            const updateTime = document.getElementById('updateTime');
-            
+        
+        async function checkLinksStatus() {
             try {
-                const response = await fetch('/api/check-link');
+                const response = await fetch('/api/check-links');
                 const data = await response.json();
                 
-                if (data.active) {
-                    statusBadge.className = 'status active';
-                    statusBadge.textContent = '🎉 代理功能已启用';
-                    
-                    if (data.lastModified) {
-                        updateTime.textContent = '最后更新: ' + data.lastModified;
-                    } else {
-                        updateTime.textContent = '最后更新: 未知';
-                    }
-                } else {
-                    statusBadge.className = 'status inactive';
-                    statusBadge.textContent = '❌ 代理功能已失效';
-                    updateTime.textContent = '更新检测失败';
+                if (data.links && Array.isArray(data.links)) {
+                    data.links.forEach(link => {
+                        const statusElement = document.getElementById('status-' + link.id);
+                        const metaElement = document.getElementById('meta-' + link.id);
+                        
+                        if (statusElement && metaElement) {
+                            // 更新状态
+                            statusElement.className = 'link-status ' + (link.active ? 'active' : 'inactive');
+                            statusElement.querySelector('.status-text').textContent = 
+                                link.active ? '🟢 服务正常' : '🔴 服务异常';
+                            
+                            // 更新元数据
+                            let metaText = '最后更新: ' + (link.lastModified || '未知');
+                            if (link.error) {
+                                metaText += ' | 错误: ' + link.error;
+                            } else if (link.status) {
+                                metaText += ' | 状态码: ' + link.status;
+                            }
+                            metaElement.textContent = metaText;
+                        }
+                    });
                 }
             } catch (error) {
-                statusBadge.className = 'status inactive';
-                statusBadge.textContent = '❌ 代理功能检测失败';
-                updateTime.textContent = '网络连接异常';
+                console.error('检查链接状态失败:', error);
+                // 更新所有链接状态为检查失败
+                document.querySelectorAll('.link-status').forEach(statusElement => {
+                    statusElement.className = 'link-status error';
+                    statusElement.querySelector('.status-text').textContent = '检查失败';
+                });
             }
         }
-
-        function copyToClipboard() {
-            navigator.clipboard.writeText(subscriptionUrl).then(function() {
-                copyButton.classList.add('button-copied');
-                copyFeedback.classList.add('show');
+        
+        // 复制功能
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.copy-btn')) {
+                const button = e.target.closest('.copy-btn');
+                const linkId = button.dataset.linkId;
+                const urlElement = document.getElementById('url-' + linkId);
                 
-                recordStat('copy_clicks');
-                
-                setTimeout(function() {
-                    copyButton.classList.remove('button-copied');
-                    copyFeedback.classList.remove('show');
-                }, 2000);
-            }).catch(function(err) {
-                console.error('复制失败:', err);
-                copyButton.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
-                copyButton.querySelector('span').textContent = '复制失败';
-                
-                setTimeout(function() {
-                    copyButton.style.background = '';
-                    copyButton.querySelector('span').textContent = '订阅链接（点击复制）';
-                }, 2000);
+                if (urlElement) {
+                    const url = urlElement.textContent;
+                    
+                    navigator.clipboard.writeText(url).then(function() {
+                        button.classList.add('copied');
+                        
+                        // 上报统计
+                        recordStat('copy_clicks', linkId);
+                        
+                        setTimeout(function() {
+                            button.classList.remove('copied');
+                        }, 2000);
+                    }).catch(function(err) {
+                        console.error('复制失败:', err);
+                        button.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+                        button.querySelector('.copy-text').textContent = '复制失败';
+                        
+                        setTimeout(function() {
+                            button.style.background = '';
+                            button.querySelector('.copy-text').textContent = '复制';
+                        }, 2000);
+                    });
+                }
+            }
+        });
+        
+        // TG按钮点击统计（如果存在）
+        const tgButton = document.getElementById('tgButton');
+        if (tgButton) {
+            tgButton.addEventListener('click', function() {
+                recordStat('telegram_clicks');
             });
         }
-
-        copyButton.addEventListener('click', copyToClipboard);
-        tgButton.addEventListener('click', function() {
-            recordStat('telegram_clicks');
-        });
-
-        // 页面加载时检查状态
-        window.addEventListener('DOMContentLoaded', checkLinkStatus);
         
-        // 每30秒自动检查状态
-        setInterval(checkLinkStatus, 30000);
+        // 页面加载时检查状态
+        window.addEventListener('DOMContentLoaded', function() {
+            checkLinksStatus();
+            
+            // 每30秒自动检查状态
+            setInterval(checkLinksStatus, 30000);
+            
+            // 为每个链接添加初始状态检查动画
+            links.forEach(link => {
+                const statusElement = document.getElementById('status-' + link.id);
+                if (statusElement) {
+                    const dot = statusElement.querySelector('.status-dot');
+                    if (dot) {
+                        // 添加呼吸动画
+                        dot.style.animation = 'pulse 1.5s infinite';
+                    }
+                }
+            });
+        });
+        
+        // 平滑滚动效果
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const targetId = this.getAttribute('href');
+                if (targetId && targetId !== '#') {
+                    const targetElement = document.querySelector(targetId);
+                    if (targetElement) {
+                        targetElement.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                }
+            });
+        });
     </script>
 </body>
 </html>`;
